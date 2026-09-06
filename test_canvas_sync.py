@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 from pypdf import PdfWriter
-from canvas_sync import CanvasAPI, AccessError, stream_file, resolve_sharepoint, SharePointUnavailable, retry_files, course_folder, write_json
+from canvas_sync import CanvasAPI, AccessError, stream_file, resolve_sharepoint, SharePointUnavailable, SharePointNotFound, retry_files, course_folder, write_json
 
 
 def response(body, links=None, status=200):
@@ -47,6 +47,13 @@ class CanvasTests(unittest.TestCase):
         driver = Mock()
         driver.execute_script.return_value = {'error': True, 'message': 'Lo sentimos, no puede acceder a este documento.'}
         with self.assertRaisesRegex(SharePointUnavailable, 'no puede acceder'):
+            resolve_sharepoint(driver, timeout=0.1)
+        self.assertEqual(driver.execute_script.call_count, 1)
+
+    def test_sharepoint_404_not_found_stops_immediately(self):
+        driver = Mock()
+        driver.execute_script.return_value = {'error': True, 'type': 'not_found', 'message': '404 NOT FOUND'}
+        with self.assertRaises(SharePointNotFound):
             resolve_sharepoint(driver, timeout=0.1)
         self.assertEqual(driver.execute_script.call_count, 1)
 

@@ -26,18 +26,33 @@ class SharePointUnavailable(AccessError):
         self.message = message
 
 
+class SharePointNotFound(AccessError):
+    def __init__(self, message='404 NOT FOUND: El archivo ya no existe en SharePoint'):
+        super().__init__(message)
+        self.message = message
+
+
 def resolve_sharepoint(driver, timeout=30):
-    """Detecta error visible antes de esperar un endpoint que nunca llegara."""
+    """Detecta error visible o 404 antes de esperar un endpoint que nunca llegara."""
     from selenium.webdriver.support.ui import WebDriverWait
     state = WebDriverWait(driver, timeout, poll_frequency=0.5).until(lambda d: d.execute_script(
-        """const error = document.querySelector('#ms-error-body');
-        if (error) return {error: true, message:
+        r"""const spError = document.querySelector('#ms-error-body');
+        if (spError) return {error: true, type: 'unavailable', message:
           (document.querySelector('#ctl00_PlaceHolderMain_LabelMessage')?.textContent ||
            document.querySelector('#ms-error-header')?.textContent || 'Error de SharePoint').trim().slice(0,500)};
+        const text = (document.body ? (document.body.innerText || document.body.textContent || '') : '').trim();
+        if (/404\s+NOT\s+FOUND/i.test(text) || (document.title && /404/i.test(document.title))) {
+          return {error: true, type: 'not_found', message: '404 NOT FOUND: El archivo ya no existe en SharePoint'};
+        }
+        if (/403\s+FORBIDDEN/i.test(text)) {
+          return {error: true, type: 'unavailable', message: '403 FORBIDDEN: Sin autorizacion en SharePoint'};
+        }
         const url = performance.getEntriesByType('resource').map(e=>e.name)
           .find(u=>u.includes('/_layouts/15/download.aspx'));
         return url ? {url} : null;"""))
     if state.get('error'):
+        if state.get('type') == 'not_found':
+            raise SharePointNotFound(state['message'])
         raise SharePointUnavailable(state['message'])
     return state['url']
 
@@ -205,6 +220,11 @@ def sync(driver, api, root, selected, download, config, courses=None, resume=Fal
                         try:
                             old = prior.get(item['id'], {})
                             old_path = (root / old.get('path', '')).resolve()
+                            if (resume and old.get('status') in ('no_encontrado_sharepoint', 'sin_acceso_sharepoint')
+                                    and old.get('external_url') == item.get('external_url')):
+                                record.update(status=old['status'], message=old.get('message', ''), checked_at=old.get('checked_at'))
+                                records.append(record)
+                                continue
                             if (resume and old.get('sha256') and old.get('external_url') == item.get('external_url')
                                     and old.get('content_id') == item.get('content_id')
                                     and old_path.is_relative_to(root.resolve()) and old_path.is_file()
@@ -232,7 +252,8 @@ def sync(driver, api, root, selected, download, config, courses=None, resume=Fal
                                 host = urlsplit(item['external_url']).hostname or ''
                                 record['status'] = 'pendiente_conector' if '.' in host else 'enlace_incompleto'
                                 if host in config['sharepoint_hosts'] and download:
-                                    if '/:b:/' not in item['external_url']:
+                                    is_pdf_url = '/:b:/' in item['external_url'] or urlsplit(item['external_url']).path.lower().endswith('.pdf')
+                                    if not is_pdf_url:
                                         raise AccessError('Tipo de SharePoint aun no implementado')
                                     driver.get(item['external_url'])
                                     # Endpoint realmente cargado por el visor; no adivina IDs.
@@ -246,6 +267,10 @@ def sync(driver, api, root, selected, download, config, courses=None, resume=Fal
                                         record['path'] = str(path.relative_to(root))
                             else:
                                 record['status'] = 'inventariado'
+                        except SharePointNotFound as exc:
+                            record['status'] = 'no_encontrado_sharepoint'
+                            record['message'] = exc.message
+                            record['checked_at'] = datetime.now(timezone.utc).isoformat()
                         except SharePointUnavailable as exc:
                             record['status'] = 'sin_acceso_sharepoint'
                             record['message'] = exc.message

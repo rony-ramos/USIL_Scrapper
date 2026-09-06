@@ -80,11 +80,31 @@ registra el lote más reciente y `sync.sqlite3` conserva los informes de ejecuci
 Un estado `inventariado` del curso no significa que todos sus archivos se hayan
 descargado; revisa los estados individuales y los contadores del informe.
 
+## Monitoreo y diagnóstico
+
+Para supervisar el avance de las descargas e identificar qué cursos tienen pocos PDFs o incidencias de acceso:
+
+```powershell
+# Diagnóstico general con umbral predeterminado (<= 5 PDFs):
+.\.venv\Scripts\python.exe detectar_pocos_pdfs.py
+
+# Ajustar el umbral de alerta (ejemplo: cursos con <= 10 PDFs):
+.\.venv\Scripts\python.exe detectar_pocos_pdfs.py --umbral 10
+
+# Consultar un curso puntual por ID:
+.\.venv\Scripts\python.exe detectar_pocos_pdfs.py --course 58245
+
+# Evaluar todos los cursos del inventario (no solo los seleccionados):
+.\.venv\Scripts\python.exe detectar_pocos_pdfs.py --all
+```
+
+El script cuenta los PDFs reales en disco (omitiendo temporales y versiones archivadas), cruza los registros de `recursos.json` y desglosa las causas: enlaces bloqueados por permisos de SharePoint (`sin_acceso_sharepoint`), archivos eliminados o rotos (`no_encontrado_sharepoint`), enlaces de Office 365 que requieren otros conectores (`pendiente_conector`), o cursos cuyo contenido principal son páginas/tareas digitales de Canvas.
+
 ## Alcance actual
 
 - Cursos, módulos y todos sus elementos, siguiendo los enlaces de paginación.
 - Contenido de páginas e instrucciones de tareas como JSON.
-- Archivos de Canvas y PDFs enlazados de SharePoint (`/:b:/`) cuyo visor permite
+- Archivos de Canvas y PDFs enlazados de SharePoint (`/:b:/` o enlaces directos con extensión `.pdf`) cuyo visor permite
   resolver un endpoint de descarga.
 - Pendientes explícitos para accesos fallidos, enlaces incompletos y destinos
   que requieren otros conectores.
@@ -94,16 +114,18 @@ su API autenticada. Redirecciones adicionales requieren un host permitido
 en `download_hosts`. Para volver a intentar solo los archivos Canvas pendientes
 del inventario local, usa `canvas_sync.py --retry-files`.
 
-Las páginas de error de SharePoint (`ms-error-body`) se detectan sin esperar
-a que aparezca el visor. El recurso queda como `sin_acceso_sharepoint`, con
-el mensaje visible y fecha de comprobación, conservando el enlace. Ese estado
-no afirma que el archivo haya sido eliminado: puede ser un problema de acceso.
-La próxima actualización vuelve a comprobarlo.
+Las páginas de error de SharePoint (`ms-error-body` o respuestas directas en texto plano
+como `404 NOT FOUND` y `403 FORBIDDEN`) se detectan de inmediato sin esperar a que venza
+el tiempo de carga del visor. Si el archivo ya no existe, queda registrado como
+`no_encontrado_sharepoint`. Si el error es de permisos, queda como `sin_acceso_sharepoint`,
+con el mensaje visible y fecha de comprobación, conservando el enlace. La próxima
+actualización completa vuelve a comprobarlos.
 
 Para reanudar un lote interrumpido puedes añadir `--resume`: verifica los
-archivos existentes por SHA-256 y no los descarga otra vez. Usa la ejecución
-normal, sin `--resume`, en las actualizaciones semanales para comprobar cambios
-remotos incluso cuando la URL siga siendo la misma.
+archivos existentes por SHA-256 (no los descarga otra vez) y omite los enlaces
+de SharePoint ya clasificados como `no_encontrado_sharepoint` o `sin_acceso_sharepoint`
+para agilizar la reanudación. Usa la ejecución normal, sin `--resume`, en las actualizaciones
+semanales para comprobar cambios remotos incluso cuando la URL siga siendo la misma.
 
 No recorre todavía archivos fuera de módulos ni enlaces dentro de los cuerpos
 de páginas/tareas. No descarga participaciones, respuestas de cuestionarios ni
