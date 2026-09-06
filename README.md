@@ -1,110 +1,142 @@
-# Biblioteca de cursos USIL
+# Biblioteca de cursos Canvas
 
-## Configuración acordada
+Cliente local en Python: SeleniumBase permite iniciar sesión; `requests` consulta
+la API de Canvas y descarga los materiales. Cada persona utiliza su propia
+cuenta, perfil de Chrome y configuración. No requiere claves o rutas del autor.
 
-La carpeta raíz está definida en `biblioteca.config.json`:
+## Requisitos
 
-`A:\USIL CS\USIL Scrapper\biblioteca`
+- Python 3.12 y Google Chrome instalado.
+- Acceso a los cursos mediante una cuenta de la institución.
+- Validado en Windows. Otras plataformas requieren su propia validación.
 
-Organización: período / curso / unidad / semana / archivo.
-La actualización será manual mediante «Actualizar biblioteca», con uso semanal.
-No hay una tarea programada.
-
-## Estado
-
-Se verificó el inventario de módulos de Canvas y la descarga de un PDF de
-SharePoint a la carpeta predeterminada del navegador. `piloto.py` implementa
-la prueba de descarga directa. Solo se considera validada cuando produce
-`biblioteca/validacion-piloto.json`. No cambia el perfil habitual de Chrome.
-
-El descargador deberá determinar la ruta antes de transferir cada archivo,
-sanear los nombres para Windows y validar que el destino permanezca dentro
-de la raíz. Los archivos temporales de descarga deben permanecer junto al
-destino final. El catálogo deberá conservar los IDs de Canvas, fuente,
-ruta, estado y versiones para evitar duplicados y actualizar pendientes.
-
-## Ejecutar el piloto
-
-Requiere Windows, Chrome instalado y Python 3.12. Desde esta carpeta:
+## Instalación y configuración (PowerShell)
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.lock.txt
-.\.venv\Scripts\python.exe piloto.py --plan
-.\.venv\Scripts\python.exe piloto.py
+.\.venv\Scripts\python.exe configurar.py
 ```
 
-Microsoft puede pedir inicio de sesión/MFA en la ventana visible del perfil
-exclusivo `.browser-profile`. El programa espera hasta cinco minutos. Este
-perfil puede conservar la sesión y está excluido de Git. No se exportan cookies.
+El último comando copia los ejemplos **sin sobrescribir** configuraciones
+existentes. Edita `biblioteca.config.json` para indicar:
 
-Chrome recibe la ruta final antes del clic mediante `Browser.setDownloadBehavior`
-con `allowAndName`. Escribe el temporal de la descarga y el archivo completado
-en esa carpeta. Python valida el PDF y lo renombra dentro del mismo directorio.
-No usa `download.save_as()` ni mueve un archivo desde Descargas.
+| Campo | Uso |
+|---|---|
+| `canvas_url` | Origen HTTPS de Canvas de tu institución |
+| `root` | Carpeta para la biblioteca |
+| `browser_profile` | Carpeta exclusiva del perfil de automatización |
+| `courses_file` | JSON local con los IDs de los cursos seleccionados |
+| `pilot_file` | Recurso local opcional para las pruebas piloto |
+| `sharepoint_hosts` | Hosts exactos de SharePoint usados por tus materiales |
+| `download_hosts` | Hosts adicionales de descarga/CDN autorizados |
 
-El piloto exige 39 páginas. Opcionalmente acepta `--reference RUTA_PDF` para
-comparar SHA-256. Una segunda ejecución verifica la huella local y omite la
-descarga registrada. Este comportamiento no comprueba cambios remotos: la
-sincronización semanal, versiones, reintentos y el botón todavía no están
-implementados. Un archivo existente no registrado no se sobrescribe. Los
-errores dejan el piloto incompleto y pueden dejar temporales para diagnóstico.
+Las rutas relativas se resuelven respecto al archivo de configuración, incluso
+si ejecutas Python desde otra carpeta. También se admiten rutas absolutas
+locales. Usa `--config RUTA` para elegir otra configuración. Si cambias las
+carpetas dentro del repositorio, agrégalas a `.gitignore`; también puedes
+ubicarlas fuera del repositorio.
 
-Pruebas locales: `.\.venv\Scripts\python.exe -m unittest -v`.
-
-Referencias: https://playwright.dev/python/docs/api/class-browsertype y
-https://chromedevtools.github.io/devtools-protocol/tot/Browser/#method-setDownloadBehavior
-
-## Piloto con requests
-
-`piloto_requests.py` usa el enlace de descarga observado para este PDF concreto.
-Reutiliza cookies del perfil exclusivo en memoria y cierra Chrome antes de
-descargar por bloques con requests. No exporta cookies ni controla clics de
-descarga. Solo admite HTTPS y redirecciones dentro del host de SharePoint.
+## Elegir y descargar cursos
 
 ```powershell
-.\.venv\Scripts\python.exe piloto_requests.py
-# Si aparece AUTH_REQUIRED, renovar acceso en el perfil exclusivo:
+# Iniciar sesión y consultar todos los cursos, incluyendo paginación:
+.\.venv\Scripts\python.exe canvas_sync.py --list-courses
+```
+
+La lista se guarda en `biblioteca/cursos.json`. Copia los IDs deseados al campo
+`course_ids` de `cursos_seleccionados.json`. El ejemplo tiene una lista vacía
+para evitar descargar cursos por accidente.
+
+```powershell
+# Consultar estructura y guardar páginas e instrucciones:
+.\.venv\Scripts\python.exe canvas_sync.py
+# También descargar los materiales compatibles:
+.\.venv\Scripts\python.exe canvas_sync.py --download
+# Limitar una ejecución a un ID de tu lista:
+.\.venv\Scripts\python.exe canvas_sync.py --course 123 --download
+```
+
+ChromeDriver se descarga de su fuente oficial si hace falta. El navegador usa
+un perfil exclusivo y puede pedir inicio de sesión/MFA; no se conecta al Chrome
+habitual. Las cookies aplicables se transfieren a `requests` en memoria. No se
+escriben archivos de cookies ni se imprimen credenciales. La sesión permanece
+en el perfil local. No ejecutes dos procesos simultáneos con ese perfil.
+
+## Organización y actualización
+
+Los archivos se guardan directamente por período / curso con ID / módulo /
+semana. Los IDs de los recursos evitan colisiones. La descarga escribe primero
+un `.part` en la carpeta final, valida el contenido y lo renombra en esa misma
+carpeta. No utiliza Descargas como paso intermedio.
+
+Repite el comando semanalmente. Los archivos idénticos se comparan con SHA-256
+tras descargarlos; los cambios se conservan en `versiones`. Las páginas e
+instrucciones JSON se actualizan y todavía no tienen historial de versiones.
+El botón de actualización y la programación automática no están implementados.
+
+`recursos.json` describe el resultado por recurso. `ultima-sincronizacion.json`
+registra el lote más reciente y `sync.sqlite3` conserva los informes de ejecución.
+Un estado `inventariado` del curso no significa que todos sus archivos se hayan
+descargado; revisa los estados individuales y los contadores del informe.
+
+## Alcance actual
+
+- Cursos, módulos y todos sus elementos, siguiendo los enlaces de paginación.
+- Contenido de páginas e instrucciones de tareas como JSON.
+- Archivos de Canvas y PDFs enlazados de SharePoint (`/:b:/`) cuyo visor permite
+  resolver un endpoint de descarga.
+- Pendientes explícitos para accesos fallidos, enlaces incompletos y destinos
+  que requieren otros conectores.
+
+Los archivos de Canvas también pueden usar un host de descarga devuelto por
+su API autenticada. Redirecciones adicionales requieren un host permitido
+en `download_hosts`. Para volver a intentar solo los archivos Canvas pendientes
+del inventario local, usa `canvas_sync.py --retry-files`.
+
+Las páginas de error de SharePoint (`ms-error-body`) se detectan sin esperar
+a que aparezca el visor. El recurso queda como `sin_acceso_sharepoint`, con
+el mensaje visible y fecha de comprobación, conservando el enlace. Ese estado
+no afirma que el archivo haya sido eliminado: puede ser un problema de acceso.
+La próxima actualización vuelve a comprobarlo.
+
+Para reanudar un lote interrumpido puedes añadir `--resume`: verifica los
+archivos existentes por SHA-256 y no los descarga otra vez. Usa la ejecución
+normal, sin `--resume`, en las actualizaciones semanales para comprobar cambios
+remotos incluso cuando la URL siga siendo la misma.
+
+No recorre todavía archivos fuera de módulos ni enlaces dentro de los cuerpos
+de páginas/tareas. No descarga participaciones, respuestas de cuestionarios ni
+otros formatos de SharePoint. Los hosts de CDN adicionales se configuran
+localmente; no se siguen redirecciones a destinos arbitrarios.
+
+## Pilotos opcionales
+
+`piloto.py` y `piloto_requests.py` sirven para probar un PDF individual. Crea
+`piloto.json` desde `piloto.example.json` y configura un enlace propio, el número
+de páginas y (para requests) el endpoint realmente observado en el visor.
+
+```powershell
+.\.venv\Scripts\python.exe piloto.py --plan
 .\.venv\Scripts\python.exe piloto_requests.py --login
 ```
 
-El archivo `.pdf.part` se escribe junto al PDF final. Se valida antes de
-renombrar y registrar. `validacion-requests.json` con estado
-`downloaded_requests` demuestra el éxito de esta modalidad; una redirección
-de autenticación o HTML no se considera descarga válida. Las cookies
-disponibles no implican que la sesión siga autenticada.
+Ambos usan la configuración local predeterminada. `--reference RUTA_PDF` compara
+el archivo con una copia conocida. Estos pilotos no reemplazan al sincronizador.
 
-## SeleniumBase + API Canvas
+## Git y pruebas
+
+Se versionan código, dependencias y archivos `*.example.json`. Las configuraciones
+locales, el perfil, los materiales y los registros están excluidos de Git.
+Agregar algo a `.gitignore` no lo elimina de commits anteriores.
 
 ```powershell
-.\.venv\Scripts\python.exe canvas_sync.py --course 79493 --download
-# Inventario y contenidos de todos los IDs seleccionados:
-.\.venv\Scripts\python.exe canvas_sync.py
-# También descargar archivos compatibles:
-.\.venv\Scripts\python.exe canvas_sync.py --download
+.\.venv\Scripts\python.exe -m unittest -v
 ```
 
-Usa SeleniumBase estándar y el perfil exclusivo del piloto. No se conecta a
-Chrome habitual si no fue iniciado con una interfaz de automatización. No
-cierra ese navegador ni lee su base de cookies. La primera ejecución puede
-descargar ChromeDriver oficial y pedir inicio de sesión USIL/Microsoft.
-Las cookies relevantes se transfieren a requests exclusivamente en memoria.
+Las pruebas locales cubren paginación, aislamiento de hosts, HTML de login,
+rutas, validación PDF y versiones. La autenticación real requiere tu cuenta.
 
-`cursos_seleccionados.json` contiene la selección explícita de TI/software.
-Se siguen los encabezados Link de Canvas y se consultan todos los elementos
-de cada módulo. Se guardan páginas e instrucciones de tareas como JSON;
-los enlaces internos de esos cuerpos todavía no se recorren. Cuestionarios
-y foros se inventarían sin consultar respuestas o participaciones.
-
-La estructura actual usa período / curso con ID / módulo / encabezado de
-semana. Los IDs en archivos evitan colisiones. Los archivos que cambian se
-conservan en `versiones`; los idénticos se detectan por SHA-256 después de
-consultar su contenido. Los PDFs SharePoint se resuelven desde el endpoint
-observado en su visor y se descargan por requests. Otros tipos o destinos
-requieren conectores adicionales y quedan pendientes. Una descarga fallida
-no se declara exitosa. `recursos.json` describe el resultado por recurso.
-
-La implementación está en validación; no garantiza todavía cubrir archivos
-fuera de módulos ni todos los enlaces externos. No hay botón ni programación
-semanal instalados. `ultima-sincronizacion.json` y `sync.sqlite3` registran
-las ejecuciones que pudieron realizarse.
+Documentación: [SeleniumBase](https://seleniumbase.io/),
+[Canvas API](https://developerdocs.instructure.com/services/canvas),
+[Chrome Download Behavior](https://chromedevtools.github.io/devtools-protocol/tot/Browser/#method-setDownloadBehavior).

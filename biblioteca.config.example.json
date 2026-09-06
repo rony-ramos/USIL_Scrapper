@@ -1,0 +1,10 @@
+{
+  "canvas_url": "https://universidad.instructure.com",
+  "root": "biblioteca",
+  "browser_profile": ".browser-profile",
+  "courses_file": "cursos_seleccionados.json",
+  "pilot_file": "piloto.json",
+  "sharepoint_hosts": ["universidad-my.sharepoint.com"],
+  "download_hosts": [],
+  "update_mode": "manual"
+}

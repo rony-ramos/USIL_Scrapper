@@ -9,7 +9,7 @@ import sqlite3
 import time
 from urllib.parse import urlparse
 
-BASE = Path(__file__).resolve().parent
+from settings import BASE, load_settings, load_pilot
 
 
 def component(value):
@@ -58,8 +58,8 @@ def validate(path, expected_pages):
 
 
 def run(args):
-    config = json.loads((BASE / 'biblioteca.config.json').read_text('utf-8'))
-    resource = json.loads((BASE / 'piloto.json').read_text('utf-8'))
+    config = load_settings()
+    resource = load_pilot(config)
     root, target = destination(config, resource)
     if args.plan:
         print(json.dumps({'destino': str(target), 'temporal_en': str(target.parent)}, indent=2))
@@ -75,13 +75,13 @@ def run(args):
     if target.exists():
         raise RuntimeError('Hay un archivo no verificado en el destino; no se sobrescribe')
     target.parent.mkdir(parents=True, exist_ok=True)
-    if urlparse(resource['url']).hostname != 'usilpe-my.sharepoint.com':
+    if urlparse(resource['url']).hostname not in config['sharepoint_hosts']:
         raise ValueError('Host no autorizado para este piloto')
 
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
-            str(BASE / '.browser-profile'), channel='chrome', headless=False,
+            config['browser_profile'], channel='chrome', headless=False,
             accept_downloads=True, downloads_path=str(target.parent))
         try:
             page = context.pages[0] if context.pages else context.new_page()

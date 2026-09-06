@@ -1,0 +1,11 @@
+{
+  "resource_id": "mi-recurso",
+  "periodo": "2026-02",
+  "curso": "Nombre del curso",
+  "unidad": "Unidad 01",
+  "semana": "S01",
+  "archivo": "Documento.pdf",
+  "url": "https://universidad-my.sharepoint.com/enlace-compartido",
+  "download_url": "https://universidad-my.sharepoint.com/ruta-de-descarga-observada",
+  "expected_pages": 1
+}
