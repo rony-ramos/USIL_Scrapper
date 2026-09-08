@@ -57,6 +57,17 @@ class CanvasTests(unittest.TestCase):
             resolve_sharepoint(driver, timeout=0.1)
         self.assertEqual(driver.execute_script.call_count, 1)
 
+    def test_sharepoint_modern_access_denied_stops_without_waiting(self):
+        driver = Mock()
+        driver.execute_script.return_value = {
+            'error': True,
+            'type': 'unavailable',
+            'message': 'Necesita acceso: Usted (usuario@usil.pe) no tiene acceso a este objeto elemento.'
+        }
+        with self.assertRaisesRegex(SharePointUnavailable, 'Necesita acceso'):
+            resolve_sharepoint(driver, timeout=0.1)
+        self.assertEqual(driver.execute_script.call_count, 1)
+
     def test_sharepoint_download_endpoint(self):
         driver = Mock()
         driver.execute_script.return_value = {'url': 'https://files.example.com/_layouts/15/download.aspx?id=1'}

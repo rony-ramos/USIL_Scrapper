@@ -40,12 +40,19 @@ def resolve_sharepoint(driver, timeout=30):
         if (spError) return {error: true, type: 'unavailable', message:
           (document.querySelector('#ctl00_PlaceHolderMain_LabelMessage')?.textContent ||
            document.querySelector('#ms-error-header')?.textContent || 'Error de SharePoint').trim().slice(0,500)};
+        const modernDenied = document.querySelector('#ModernAccessDeniedRoot, .ModernAccessDeniedRoot');
+        if (modernDenied) {
+          const header = document.querySelector('.ModernAccContentHeader')?.textContent || 'Necesita acceso';
+          const sub = document.querySelector('#ModernAccSubHeader4, .ModernAccContentSubHeader')?.textContent;
+          const msg = (sub ? `${header}: ${sub}` : header).trim().slice(0, 500);
+          return {error: true, type: 'unavailable', message: msg};
+        }
         const text = (document.body ? (document.body.innerText || document.body.textContent || '') : '').trim();
         if (/404\s+NOT\s+FOUND/i.test(text) || (document.title && /404/i.test(document.title))) {
           return {error: true, type: 'not_found', message: '404 NOT FOUND: El archivo ya no existe en SharePoint'};
         }
-        if (/403\s+FORBIDDEN/i.test(text)) {
-          return {error: true, type: 'unavailable', message: '403 FORBIDDEN: Sin autorizacion en SharePoint'};
+        if (/403\s+FORBIDDEN/i.test(text) || /Necesita acceso|You need permission|no tiene acceso a este/i.test(text)) {
+          return {error: true, type: 'unavailable', message: 'Sin autorizacion en SharePoint: ' + text.slice(0, 200)};
         }
         const url = performance.getEntriesByType('resource').map(e=>e.name)
           .find(u=>u.includes('/_layouts/15/download.aspx'));

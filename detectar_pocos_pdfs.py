@@ -138,10 +138,10 @@ def main():
         else:
             target_ids = list(courses_map.keys())
 
-    # Pre-indexar carpetas existentes por ID de curso
+    # Pre-indexar carpetas existentes por ID de curso (ignorando la carpeta consolidada 'pdf')
     folder_by_id = {}
     for p in root.glob('*/*'):
-        if p.is_dir():
+        if p.is_dir() and p.parent.name != 'pdf':
             m = re.search(r'\[(\d+)\]$', p.name)
             if m:
                 folder_by_id[int(m.group(1))] = p

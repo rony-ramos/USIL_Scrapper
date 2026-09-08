@@ -100,6 +100,23 @@ Para supervisar el avance de las descargas e identificar qué cursos tienen poco
 
 El script cuenta los PDFs reales en disco (omitiendo temporales y versiones archivadas), cruza los registros de `recursos.json` y desglosa las causas: enlaces bloqueados por permisos de SharePoint (`sin_acceso_sharepoint`), archivos eliminados o rotos (`no_encontrado_sharepoint`), enlaces de Office 365 que requieren otros conectores (`pendiente_conector`), o cursos cuyo contenido principal son páginas/tareas digitales de Canvas.
 
+## Consolidación de PDFs
+
+Para reunir todos los PDFs descargados de cada curso en una carpeta centralizada (sin tener que navegar por la jerarquía profunda de módulos y semanas):
+
+```powershell
+# Consolidar los PDFs de todos los cursos en biblioteca/pdf/{curso}:
+.\.venv\Scripts\python.exe consolidar_pdfs.py
+
+# Simular la copia sin escribir en disco (dry-run):
+.\.venv\Scripts\python.exe consolidar_pdfs.py --dry-run
+
+# Consolidar únicamente un curso puntual por ID o nombre:
+.\.venv\Scripts\python.exe consolidar_pdfs.py --course 80162
+```
+
+El script copia los archivos utilizando `shutil.copy2` preservando fechas y metadatos. Es **idempotente**: compara con SHA-256 y no vuelve a copiar archivos que ya estén al día. Si existen archivos con el mismo nombre en módulos o semanas distintas con contenido diferente, desambigua automáticamente el nombre con el prefijo de su módulo o semana.
+
 ## Alcance actual
 
 - Cursos, módulos y todos sus elementos, siguiendo los enlaces de paginación.
@@ -114,11 +131,11 @@ su API autenticada. Redirecciones adicionales requieren un host permitido
 en `download_hosts`. Para volver a intentar solo los archivos Canvas pendientes
 del inventario local, usa `canvas_sync.py --retry-files`.
 
-Las páginas de error de SharePoint (`ms-error-body` o respuestas directas en texto plano
-como `404 NOT FOUND` y `403 FORBIDDEN`) se detectan de inmediato sin esperar a que venza
-el tiempo de carga del visor. Si el archivo ya no existe, queda registrado como
-`no_encontrado_sharepoint`. Si el error es de permisos, queda como `sin_acceso_sharepoint`,
-con el mensaje visible y fecha de comprobación, conservando el enlace. La próxima
+Las páginas de error y denegación de SharePoint (error clásico `ms-error-body`, pantalla moderna
+`ModernAccessDeniedRoot` con "Necesita acceso", o respuestas directas en texto plano como `404 NOT FOUND` y `403 FORBIDDEN`)
+se detectan de inmediato sin esperar a que venza el tiempo de carga del visor. Si el archivo ya no existe, queda registrado como
+`no_encontrado_sharepoint`. Si el error es de permisos, queda como `sin_acceso_sharepoint`, con el mensaje visible
+(ej. *"Usted no tiene acceso a este objeto elemento"*) y fecha de comprobación, conservando el enlace. La próxima
 actualización completa vuelve a comprobarlos.
 
 Para reanudar un lote interrumpido puedes añadir `--resume`: verifica los
