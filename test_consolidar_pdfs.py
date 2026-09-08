@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from pypdf import PdfWriter
-from consolidar_pdfs import find_course_directories, collect_pdfs, consolidate_course, run_consolidation
+from consolidar_pdfs import find_course_directories, collect_pdfs, consolidate_course, run_consolidation, format_pdf_name
 
 
 def create_pdf(path, pages=1):
@@ -81,6 +81,27 @@ class ConsolidarPdfsTests(unittest.TestCase):
             names = [f.name for f in dest_files]
             self.assertIn('silabo.pdf', names)
             self.assertTrue(any('Modulo 2_S02_silabo.pdf' in n or 'silabo_' in n for n in names))
+
+    def test_format_pdf_name_moves_code_to_brackets_at_end(self):
+        self.assertEqual(format_pdf_name('7708286-S01 Mat. Clase.pdf'), 'S01 Mat. Clase [7708286].pdf')
+        self.assertEqual(format_pdf_name('12345_documento.pdf'), 'documento [12345].pdf')
+        self.assertEqual(format_pdf_name('999 - Tarea Final.pdf'), 'Tarea Final [999].pdf')
+        self.assertEqual(format_pdf_name('silabo.pdf'), 'silabo.pdf')
+        self.assertEqual(format_pdf_name('archivo [123].pdf'), 'archivo [123].pdf')
+
+    def test_consolidate_course_migrates_existing_prefixed_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            course_dir = root / '2026-02' / 'Curso C [103]'
+            dest_dir = root / 'pdf' / 'Curso C [103]'
+            create_pdf(course_dir / 'S01' / '7708286-S01 Mat. Clase.pdf')
+            create_pdf(dest_dir / '7708286-S01 Mat. Clase.pdf')
+
+            stats = consolidate_course(course_dir, dest_dir)
+            self.assertEqual(stats['total'], 1)
+            self.assertEqual(stats['migrated'], 1)
+            self.assertFalse((dest_dir / '7708286-S01 Mat. Clase.pdf').exists())
+            self.assertTrue((dest_dir / 'S01 Mat. Clase [7708286].pdf').exists())
 
 
 if __name__ == '__main__':

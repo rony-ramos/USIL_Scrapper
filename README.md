@@ -115,7 +115,7 @@ Para reunir todos los PDFs descargados de cada curso en una carpeta centralizada
 .\.venv\Scripts\python.exe consolidar_pdfs.py --course 80162
 ```
 
-El script copia los archivos utilizando `shutil.copy2` preservando fechas y metadatos. Es **idempotente**: compara con SHA-256 y no vuelve a copiar archivos que ya estén al día. Si existen archivos con el mismo nombre en módulos o semanas distintas con contenido diferente, desambigua automáticamente el nombre con el prefijo de su módulo o semana.
+El script copia los archivos utilizando `shutil.copy2` preservando fechas y metadatos. Transforma automáticamente la nomenclatura original de `{codigo}-{nombre}.pdf` a `{nombre} [{codigo}].pdf` para que los archivos se ordenen de manera natural y cronológica por sesión o semana en tu explorador de archivos, manteniendo el ID al final para evitar colisiones. Es **idempotente**: compara con SHA-256 y no vuelve a copiar archivos que ya estén al día. Si existen archivos con el mismo nombre en módulos o semanas distintas con contenido diferente, desambigua automáticamente el nombre con el prefijo de su módulo o semana.
 
 ## Alcance actual
 

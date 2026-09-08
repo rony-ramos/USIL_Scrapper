@@ -46,11 +46,22 @@ def collect_pdfs(course_dir, include_versions=False):
     return sorted(pdfs)
 
 
+def format_pdf_name(original_name):
+    """Mueve el prefijo {codigo}- al final como {nombre} [{codigo}].pdf para ordenar alfabéticamente."""
+    m = re.match(r'^(\d+)\s*[-_]\s*(.+?)(\.pdf)$', original_name, re.I)
+    if not m:
+        return original_name
+    code, body, ext = m.group(1), m.group(2).strip(), m.group(3)
+    if not body.endswith(f"[{code}]"):
+        return f"{body} [{code}]{ext}"
+    return f"{body}{ext}"
+
+
 def consolidate_course(course_dir, dest_course_dir, dry_run=False, force=False):
-    """Copia los PDFs de un curso a dest_course_dir resolviendo posibles colisiones."""
+    """Copia los PDFs de un curso a dest_course_dir con el código al final y resolviendo colisiones."""
     pdfs = collect_pdfs(course_dir)
     if not pdfs:
-        return {'total': 0, 'copied': 0, 'skipped': 0, 'renamed': 0}
+        return {'total': 0, 'copied': 0, 'skipped': 0, 'renamed': 0, 'migrated': 0}
 
     if not dry_run:
         dest_course_dir.mkdir(parents=True, exist_ok=True)
@@ -58,9 +69,26 @@ def consolidate_course(course_dir, dest_course_dir, dry_run=False, force=False):
     copied = 0
     skipped = 0
     renamed = 0
+    migrated = 0
 
     for src_pdf in pdfs:
-        dest_file = dest_course_dir / src_pdf.name
+        new_name = format_pdf_name(src_pdf.name)
+        dest_file = dest_course_dir / new_name
+        old_dest_file = dest_course_dir / src_pdf.name
+
+        # Si ya existía con el formato anterior {codigo}-{nombre}.pdf en el destino:
+        if old_dest_file.exists() and old_dest_file != dest_file and not dest_file.exists():
+            if sha256(old_dest_file) == sha256(src_pdf):
+                if not dry_run:
+                    old_dest_file.rename(dest_file)
+                migrated += 1
+                continue
+            else:
+                if not dry_run:
+                    old_dest_file.unlink()
+        elif old_dest_file.exists() and old_dest_file != dest_file and dest_file.exists():
+            if not dry_run:
+                old_dest_file.unlink()
 
         # Si ya existe un archivo con ese nombre en el destino
         if dest_file.exists() and not force:
@@ -71,7 +99,7 @@ def consolidate_course(course_dir, dest_course_dir, dry_run=False, force=False):
             # Si el contenido difiere, desambiguamos con el módulo/semana de origen
             rel_parts = src_pdf.relative_to(course_dir).parts
             prefix = '_'.join(re.sub(r'[<>:"/\\|?*]', '_', part).strip(' .') for part in rel_parts[:-1])
-            disambiguated_name = f"{prefix}_{src_pdf.name}" if prefix else f"dup_{src_pdf.name}"
+            disambiguated_name = f"{prefix}_{dest_file.name}" if prefix else f"dup_{dest_file.name}"
             dest_file = dest_course_dir / disambiguated_name
 
             if dest_file.exists():
@@ -88,7 +116,7 @@ def consolidate_course(course_dir, dest_course_dir, dry_run=False, force=False):
             shutil.copy2(src_pdf, dest_file)
         copied += 1
 
-    return {'total': len(pdfs), 'copied': copied, 'skipped': skipped, 'renamed': renamed}
+    return {'total': len(pdfs), 'copied': copied, 'skipped': skipped, 'renamed': renamed, 'migrated': migrated}
 
 
 def run_consolidation(root, dest_root=None, course_filter=None, dry_run=False, force=False):
@@ -152,17 +180,20 @@ def main():
 
     total_pdfs = 0
     total_copied = 0
+    total_migrated = 0
     total_skipped = 0
     total_renamed = 0
 
-    print(f"\n{'CURSO':<55} {'TOTAL':<8} {'COPIADOS':<10} {'OMITIDOS':<10} {'RENOMBRADOS':<10}")
+    print(f"\n{'CURSO':<50} {'TOTAL':<7} {'COPIADOS':<9} {'MIGRADOS':<9} {'OMITIDOS':<9} {'RENOMBRADOS':<10}")
     print('-' * 95)
 
     for course_name, stats in results.items():
-        cname = (course_name[:52] + '...') if len(course_name) > 55 else course_name
-        print(f"{cname:<55} {stats['total']:<8} {stats['copied']:<10} {stats['skipped']:<10} {stats['renamed']:<10}")
+        cname = (course_name[:47] + '...') if len(course_name) > 50 else course_name
+        mig = stats.get('migrated', 0)
+        print(f"{cname:<50} {stats['total']:<7} {stats['copied']:<9} {mig:<9} {stats['skipped']:<9} {stats['renamed']:<10}")
         total_pdfs += stats['total']
         total_copied += stats['copied']
+        total_migrated += mig
         total_skipped += stats['skipped']
         total_renamed += stats['renamed']
 
@@ -170,10 +201,12 @@ def main():
     print(" RESUMEN:")
     print(f"  * Cursos con PDFs:        {len(results)}")
     print(f"  * Total PDFs detectados:  {total_pdfs}")
-    print(f"  * Copiados / Actualizados: {total_copied}")
-    print(f"  * Omitidos (ya al dia):   {total_skipped}")
+    print(f"  * Copiados nuevos:        {total_copied}")
+    if total_migrated:
+        print(f"  * Migrados ({'código'} al final): {total_migrated}")
+    print(f"  * Omitidos (ya al día):   {total_skipped}")
     if total_renamed:
-        print(f"  * Renombrados (colision): {total_renamed}")
+        print(f"  * Renombrados (colisión): {total_renamed}")
     print(f"  * Carpeta de salida:      {final_dest}")
     print('=' * 95)
 
