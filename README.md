@@ -179,3 +179,9 @@ rutas, validación PDF y versiones. La autenticación real requiere tu cuenta.
 Documentación: [SeleniumBase](https://seleniumbase.io/),
 [Canvas API](https://developerdocs.instructure.com/services/canvas),
 [Chrome Download Behavior](https://chromedevtools.github.io/devtools-protocol/tot/Browser/#method-setDownloadBehavior).
+
+
+
+.\.venv\Scripts\python.exe canvas_sync.py --download --resume
+.\.venv\Scripts\python.exe consolidar_pdfs.py
+
