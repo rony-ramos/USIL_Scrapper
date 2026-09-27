@@ -27,6 +27,7 @@ existentes. Edita `biblioteca.config.json` para indicar:
 | `root` | Carpeta para la biblioteca |
 | `browser_profile` | Carpeta exclusiva del perfil de automatización |
 | `courses_file` | JSON local con los IDs de los cursos seleccionados |
+| `current_period` | Período actual como `AAAA-NN`; por ejemplo `2026-02`. Si es `null`, solo se aplica el filtro de matrícula activa de Canvas |
 | `pilot_file` | Recurso local opcional para las pruebas piloto |
 | `sharepoint_hosts` | Hosts exactos de SharePoint usados por tus materiales |
 | `download_hosts` | Hosts adicionales de descarga/CDN autorizados |
@@ -40,13 +41,20 @@ ubicarlas fuera del repositorio.
 ## Elegir y descargar cursos
 
 ```powershell
-# Iniciar sesión y consultar todos los cursos, incluyendo paginación:
+# Iniciar sesión y consultar cursos con matrícula activa del período configurado:
 .\.venv\Scripts\python.exe canvas_sync.py --list-courses
 ```
 
 La lista se guarda en `biblioteca/cursos.json`. Copia los IDs deseados al campo
 `course_ids` de `cursos_seleccionados.json`. El ejemplo tiene una lista vacía
 para evitar descargar cursos por accidente.
+
+La sincronización cruza los IDs seleccionados con los cursos publicados cuya
+matrícula está activa según Canvas. Si `current_period` está configurado, además
+exige que el nombre del curso contenga ese período. Esto evita recorrer cursos
+históricos que la universidad todavía muestra en el inventario. Puedes cambiar
+el período para una ejecución con `--period AAAA-NN`. Si ningún ID seleccionado
+coincide, el programa termina sin descargar archivos.
 
 ```powershell
 # Consultar estructura y guardar páginas e instrucciones:

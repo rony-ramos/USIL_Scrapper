@@ -191,12 +191,23 @@ def course_folder(root, course):
     return root / component(period) / (component(name) + f" [{course['id']}]")
 
 
+def active_courses(api, period=None):
+    """Matriculas vigentes y cursos publicados; periodo opcional de la institucion."""
+    courses = api.all('/api/v1/courses?per_page=100&enrollment_state=active&state%5B%5D=available')
+    if period:
+        if not isinstance(period, str) or not re.fullmatch(r'20\d\d-\d\d', period):
+            raise ValueError('current_period debe tener formato AAAA-NN, por ejemplo 2026-02')
+        courses = [course for course in courses
+                   if re.search(rf'(?<!\d){re.escape(period)}(?!\d)', course.get('name') or '')]
+    return courses
+
+
 def sync(driver, api, root, selected, download, config, courses=None, resume=False):
-    courses = courses if courses is not None else api.all('/api/v1/courses?per_page=100')
+    courses = courses if courses is not None else active_courses(api, config.get('current_period'))
     hosts = {urlsplit(api.base_url).hostname, *config['sharepoint_hosts'], *config['download_hosts']}
     public_fields = ('id', 'name', 'course_code', 'enrollment_term_id', 'access_restricted_by_date')
     write_json(root / 'cursos.json', [{k: c[k] for k in public_fields if k in c} for c in courses])
-    print(f'Inventario: {len(courses)} cursos. Seleccion: {len(selected)} IDs.', flush=True)
+    print(f'Cursos activos del periodo: {len(courses)}. Seleccionados: {len(selected & {c["id"] for c in courses})}.', flush=True)
     results = []
     with closing(sqlite3.connect(root / 'sync.sqlite3')) as db, db:
         db.execute('CREATE TABLE IF NOT EXISTS runs (time TEXT, report TEXT)')
@@ -301,12 +312,12 @@ def sync(driver, api, root, selected, download, config, courses=None, resume=Fal
         db.execute('INSERT INTO runs VALUES (?,?)', (datetime.now(timezone.utc).isoformat(), json.dumps(results)))
 
 
-def retry_files(api, root, selected, config):
+def retry_files(api, root, selected, config, courses=None):
     """Reintenta solo archivos Canvas pendientes sin volver a abrir SharePoint."""
     hosts = {urlsplit(api.base_url).hostname, *config['sharepoint_hosts'], *config['download_hosts']}
     summary_path = root / 'ultima-sincronizacion.json'
     summary = json.loads(summary_path.read_text('utf-8')) if summary_path.exists() else []
-    for course in api.all('/api/v1/courses?per_page=100'):
+    for course in courses if courses is not None else active_courses(api, config.get('current_period')):
         if course['id'] not in selected or not course.get('name'):
             continue
         folder = course_folder(root, course)
@@ -349,12 +360,16 @@ def main():
     parser.add_argument('--course', type=int, action='append')
     parser.add_argument('--login-timeout', type=int, default=600)
     parser.add_argument('--config')
+    parser.add_argument('--period', help='Periodo vigente segun el nombre del curso (AAAA-NN); prevalece sobre current_period')
     parser.add_argument('--list-courses', action='store_true')
     parser.add_argument('--retry-files', action='store_true', help='Reintentar solo archivos Canvas pendientes del inventario local')
     parser.add_argument('--resume', action='store_true', help='Reusar archivos locales verificados de un lote interrumpido; no comprueba cambios remotos de esos archivos')
     args = parser.parse_args()
     from seleniumbase import Driver
     config = load_settings(args.config)
+    period = args.period if args.period is not None else config.get('current_period')
+    if period is not None and (not isinstance(period, str) or not re.fullmatch(r'20\d\d-\d\d', period)):
+        raise ValueError('El periodo debe tener formato AAAA-NN, por ejemplo 2026-02')
     root = Path(config['root']).resolve()
     root.mkdir(parents=True, exist_ok=True)
     selected = set(args.course or ([] if args.list_courses else json.loads(Path(config['courses_file']).read_text('utf-8-sig'))['course_ids']))
@@ -377,16 +392,20 @@ def main():
                 try:
                     api.get('/api/v1/courses?per_page=1')
                     print('Canvas autenticado mediante requests.', flush=True)
+                    rows = active_courses(api, period)
                     if args.list_courses:
-                        rows = api.all('/api/v1/courses?per_page=100')
                         rows = [{k: r[k] for k in ('id', 'name', 'access_restricted_by_date') if k in r} for r in rows]
                         write_json(root / 'cursos.json', rows)
                         for row in rows:
                             print(f"{row['id']}: {row.get('name', 'Acceso restringido')}", flush=True)
                     elif args.retry_files:
-                        retry_files(api, root, selected, config)
+                        if not selected & {r['id'] for r in rows}:
+                            raise ValueError('Ningun ID seleccionado corresponde a un curso activo del periodo')
+                        retry_files(api, root, selected, config, courses=rows)
                     else:
-                        sync(driver, api, root, selected, args.download, config, resume=args.resume)
+                        if not selected & {r['id'] for r in rows}:
+                            raise ValueError('Ningun ID seleccionado corresponde a un curso activo del periodo')
+                        sync(driver, api, root, selected, args.download, config, courses=rows, resume=args.resume)
                     return
                 except AccessError:
                     pass

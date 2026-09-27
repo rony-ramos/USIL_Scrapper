@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 from pypdf import PdfWriter
-from canvas_sync import CanvasAPI, AccessError, stream_file, resolve_sharepoint, SharePointUnavailable, SharePointNotFound, retry_files, course_folder, write_json
+from canvas_sync import CanvasAPI, AccessError, active_courses, stream_file, resolve_sharepoint, SharePointUnavailable, SharePointNotFound, retry_files, course_folder, write_json
 
 
 def response(body, links=None, status=200):
@@ -17,6 +17,17 @@ def response(body, links=None, status=200):
 
 
 class CanvasTests(unittest.TestCase):
+    def test_active_courses_limit_current_period(self):
+        api = Mock()
+        api.all.return_value = [
+            {'id': 1, 'name': 'Software - 2021-01'},
+            {'id': 2, 'name': 'Proyectos - 2026-02'},
+            {'id': 3, 'name': 'Calidad - 2026-02'},
+        ]
+        self.assertEqual([c['id'] for c in active_courses(api, '2026-02')], [2, 3])
+        api.all.assert_called_once_with(
+            '/api/v1/courses?per_page=100&enrollment_state=active&state%5B%5D=available')
+
     def test_retry_canvas_file_uses_host_returned_by_authenticated_api(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
