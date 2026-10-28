@@ -31,3 +31,6 @@ Thumbs.db
 biblioteca.config.json
 cursos_seleccionados.json
 piloto.json
+
+# Generated graph output (contains local absolute paths)
+graphify-out/
