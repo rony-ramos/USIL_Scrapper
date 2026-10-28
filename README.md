@@ -1,5 +1,8 @@
 # Biblioteca de cursos Canvas
 
+La organizacion por clases, la importacion manual de VTT, el adaptador de Zoom y
+los agentes de interpretacion estan descritos en [Clases, PDFs y transcripciones](docs/conocimiento.md).
+
 Cliente local en Python: SeleniumBase permite iniciar sesión; `requests` consulta
 la API de Canvas y descarga los materiales. Cada persona utiliza su propia
 cuenta, perfil de Chrome y configuración. No requiere claves o rutas del autor.
@@ -170,6 +173,7 @@ de páginas y (para requests) el endpoint realmente observado en el visor.
 
 Ambos usan la configuración local predeterminada. `--reference RUTA_PDF` compara
 el archivo con una copia conocida. Estos pilotos no reemplazan al sincronizador.
+
 
 ## Git y pruebas
 

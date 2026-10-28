@@ -6,6 +6,10 @@ venv/
 # Browser profile & downloaded artifacts
 .browser-profile/
 biblioteca/
+conocimiento/
+.work/
+transcripciones.json
+mis-transcripciones/
 downloaded_files/
 latest_logs/
 

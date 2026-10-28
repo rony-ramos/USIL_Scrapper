@@ -1,0 +1,4 @@
+interface:
+  display_name: "Interpretar diapositivas"
+  short_description: "Interpreta cada pagina del PDF con evidencia visual"
+  default_prompt: "Usa $interpret-pdf para interpretar estas diapositivas."

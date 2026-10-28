@@ -1,11 +1,20 @@
 {
   "canvas_url": "https://universidad.instructure.com",
   "root": "biblioteca",
+  "knowledge_root": "conocimiento",
+  "knowledge_timezone": "America/Lima",
   "current_period": null,
   "browser_profile": ".browser-profile",
   "courses_file": "cursos_seleccionados.json",
   "pilot_file": "piloto.json",
   "sharepoint_hosts": ["universidad-my.sharepoint.com"],
   "download_hosts": [],
-  "update_mode": "manual"
+  "update_mode": "manual",
+  "agents": {
+    "command": "agy",
+    "model": "gemini-3.8-flash-high",
+    "timeout_seconds": 300,
+    "transcript_chunk_size": 80,
+    "pdf_renderer": "pdftoppm"
+  }
 }

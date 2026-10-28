@@ -1,0 +1,4 @@
+interface:
+  display_name: "Corregir transcripcion"
+  short_description: "Corrige y clasifica segmentos con marcas de tiempo"
+  default_prompt: "Usa $correct-transcript para procesar esta clase."
