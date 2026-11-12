@@ -85,6 +85,22 @@ ni reunion:
   --import-vtt .\mis-transcripciones\clase.vtt --class-id ID_EXISTENTE_DE_CLASE
 ```
 
+Si importaste un VTT a mano antes de capturar los metadatos de Zoom, la misma
+sesion puede quedar como dos clases (`pendientes.md` lo indica como "misma reunion
+e inicio; posible duplicado"). Unifica la clase manual con la de Zoom:
+
+```powershell
+.\.venv\Scripts\python.exe conocimiento.py --course $cursoId --merge-class ID_CLASE_MANUAL --into ID_CLASE_ZOOM --dry-run
+.\.venv\Scripts\python.exe conocimiento.py --course $cursoId --merge-class ID_CLASE_MANUAL --into ID_CLASE_ZOOM
+```
+
+Solo se admite si ambas comparten reunion e inicio y el origen no tiene metadatos
+de Zoom. Los originales y resultados procesados no se mueven: la clase manual se
+retira como `clase.unificada.json` y la clase de Zoom referencia sus archivos, asi
+que el procesamiento se reanuda donde quedo. Una captura o cURL con el mismo
+contenido que una transcripcion ya vinculada queda como `duplicate` y solo agrega
+su referencia de visor como verificacion.
+
 `--transcript-key principal` identifica de forma estable una transcripcion dentro
 de esa clase. Para una segunda parte usa otra clave, por ejemplo `parte-2`.
 Reimportar la misma clave no duplica el archivo; si cambia el contenido, conserva
@@ -145,8 +161,44 @@ leer el listado. `ultima-sincronizacion-zoom.json` resume la ejecucion. Si la se
 el panel o la solicitud cambian, registra pendientes.
 Este adaptador corresponde a la interfaz observada de Zoom LTI, no a su API publica.
 
+## Capturar transcripciones desde el navegador (recomendado)
+
+Zoom detecta la automatizacion con Selenium y cierra la sesion, por eso el
+adaptador anterior no abre reproductores. La captura se hace en el navegador
+habitual del usuario, con su sesion, mediante
+[`herramientas/zoom-vtt-capture.js`](../herramientas/zoom-vtt-capture.js):
+
+1. Abre la grabacion en Zoom (Canvas > Zoom > Grabaciones en la nube) y espera
+   a que cargue el reproductor. Si el panel de transcripcion esta oculto, abrelo.
+2. Ejecuta el script en esa pestaña:
+   - **Marcador**: crea un marcador cuya URL sea `javascript:` seguido del
+     contenido completo del archivo, y pulsalo en cada grabacion.
+   - **Agente con tu navegador** (por ejemplo Claude in Chrome): el agente abre
+     el reproductor y ejecuta el mismo script. Solo recibe el resumen (id y
+     numero de segmentos), no el texto ni credenciales.
+3. El navegador descarga `zoom-vtt-<id>.json` (normalmente en Descargas).
+4. Importa las capturas; se admiten comodines:
+
+```powershell
+.\.venv\Scripts\python.exe conocimiento.py --course $cursoId --import-capture "$HOME\Downloads\zoom-vtt-*.json" --dry-run
+.\.venv\Scripts\python.exe conocimiento.py --course $cursoId --import-capture "$HOME\Downloads\zoom-vtt-*.json"
+```
+
+El script solo reutiliza la solicitud VTT que el reproductor ya hizo: no
+construye URLs ni tokens y no lee cookies; el navegador agrega su propia sesion.
+La captura contiene el VTT original, el SHA-256 del path del visor y un id
+derivado del `fid`; no contiene URLs, cookies ni cabeceras. Usa el mismo id y la
+misma referencia que el import por cURL, asi que repetir una captura no duplica
+la transcripcion y la asociacion con la clase funciona igual. El lote se valida
+completo antes de escribir. Despues de importar puedes borrar las capturas.
+
+Si el script informa `vtt_no_observado...`, abre el panel de transcripcion,
+espera a que cargue y vuelve a ejecutarlo. Si Zoom cierra la sesion o pide una
+verificacion, deten la captura: no intentes evadir sus controles.
+
 ## Importar los cURL de transcripciones que copia el usuario
 
+Alternativa manual a la captura del navegador.
 El usuario abre los reproductores manualmente y copia las solicitudes VTT reales
 desde Network. Python recibe esos cURL como datos y envia solamente sus GET de
 transcripcion. No ejecuta comandos cURL ni reconstruye URLs o tokens.
@@ -201,7 +253,7 @@ tablas y formulas. Una pagina sin revision visual valida queda pendiente.
 ```
 
 `--source-id` selecciona un recurso PDF (ID del elemento Canvas) o transcripcion
-(ID de `clase.json`). `--model` prevalece sobre la configuracion. Repetir el comando
+(el `id` de la transcripcion dentro de `transcripts` en `clase.json`, no el ID de la clase). `--model` prevalece sobre la configuracion. Repetir el comando
 reanuda tareas por bloque/pagina; `--force` vuelve a ejecutarlas.
 `--chunk-size` cambia el numero de segmentos por tarea. En transcripciones,
 `--workers` admite 1-8 tareas concurrentes (una por defecto); las salidas se

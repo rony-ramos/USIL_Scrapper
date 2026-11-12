@@ -11,11 +11,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--course', type=int, required=True)
     parser.add_argument('--config')
-    parser.add_argument('--sync-zoom', action='store_true', help='Capturar solo metadatos; no abrir reproductores Zoom')
+    parser.add_argument('--sync-zoom', action='store_true', help='Capturar solo metadatos con Selenium; las transcripciones se obtienen con --import-capture')
     manual = parser.add_mutually_exclusive_group()
     manual.add_argument('--import-vtt', help='Archivo VTT UTF-8 exportado manualmente')
     manual.add_argument('--import-manifest', help='Lote JSON; rutas relativas a ese JSON')
     manual.add_argument('--import-curl', metavar='ARCHIVO_O_-', help='cURL VTT proporcionados; - lee stdin sin guardar credenciales')
+    manual.add_argument('--import-capture', nargs='+', metavar='ARCHIVO',
+                        help='Capturas zoom-vtt-*.json del navegador (admite comodines); sin credenciales')
+    manual.add_argument('--merge-class', metavar='ID_ORIGEN',
+                        help='Unificar una clase manual duplicada con la clase de Zoom indicada en --into')
+    parser.add_argument('--into', metavar='ID_DESTINO', help='Clase destino de --merge-class')
     parser.add_argument('--class-date', help='Fecha ISO con offset para crear una clase manual')
     parser.add_argument('--class-id', help='Asociar VTT a una clase ya inventariada')
     parser.add_argument('--meeting-id', help='ID de reunion opcional para una clase manual nueva')
@@ -29,7 +34,9 @@ def main():
         parser.error('--limit debe ser positivo')
     if (args.class_date or args.class_id or args.meeting_id) and not args.import_vtt:
         parser.error('--class-date, --class-id y --meeting-id requieren --import-vtt')
-    if args.sync_zoom and (args.import_vtt or args.import_manifest or args.import_curl):
+    if bool(args.merge_class) != bool(args.into):
+        parser.error('--merge-class y --into se usan juntos')
+    if args.sync_zoom and (args.import_vtt or args.import_manifest or args.import_curl or args.import_capture or args.merge_class):
         parser.error('Ejecuta la sincronizacion y la importacion en comandos separados')
     config = load_settings(args.config)
     context = course_context(config, args.course)
@@ -48,6 +55,17 @@ def main():
         text = sys.stdin.read() if args.import_curl == '-' else Path(args.import_curl).read_text('utf-8-sig')
         result['imports'] = import_curls(context, text, args.dry_run)
         del text
+        result['associations'] = associate_pending(context, args.dry_run)
+        result.update(organize(context, dry_run=args.dry_run))
+    if args.merge_class:
+        from manual_transcripts import merge_classes
+        from transcript_requests import associate_pending
+        result['merge'] = merge_classes(context, args.merge_class, args.into, args.dry_run)
+        result['associations'] = associate_pending(context, args.dry_run)
+        result.update(organize(context, dry_run=args.dry_run))
+    if args.import_capture:
+        from transcript_requests import associate_pending, import_captures
+        result['imports'] = import_captures(context, args.import_capture, args.dry_run)
         result['associations'] = associate_pending(context, args.dry_run)
         result.update(organize(context, dry_run=args.dry_run))
     if args.sync_zoom:

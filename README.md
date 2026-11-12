@@ -81,8 +81,10 @@ semana. Los IDs de los recursos evitan colisiones. La descarga escribe primero
 un `.part` en la carpeta final, valida el contenido y lo renombra en esa misma
 carpeta. No utiliza Descargas como paso intermedio.
 
-Repite el comando semanalmente. Los archivos idénticos se comparan con SHA-256
-tras descargarlos; los cambios se conservan en `versiones`. Las páginas e
+Repite el comando semanalmente. La sincronización es **incremental por defecto**:
+un archivo de Canvas con copia local verificada por SHA-256 solo se descarga de
+nuevo si la API informa otro nombre, tamaño o fecha de modificación. Los cambios
+se conservan en `versiones`. Las páginas e
 instrucciones JSON se actualizan y todavía no tienen historial de versiones.
 El botón de actualización y la programación automática no están implementados.
 
@@ -146,14 +148,20 @@ Las páginas de error y denegación de SharePoint (error clásico `ms-error-body
 `ModernAccessDeniedRoot` con "Necesita acceso", o respuestas directas en texto plano como `404 NOT FOUND` y `403 FORBIDDEN`)
 se detectan de inmediato sin esperar a que venza el tiempo de carga del visor. Si el archivo ya no existe, queda registrado como
 `no_encontrado_sharepoint`. Si el error es de permisos, queda como `sin_acceso_sharepoint`, con el mensaje visible
-(ej. *"Usted no tiene acceso a este objeto elemento"*) y fecha de comprobación, conservando el enlace. La próxima
-actualización completa vuelve a comprobarlos.
+(ej. *"Usted no tiene acceso a este objeto elemento"*) y fecha de comprobación, conservando el enlace.
 
-Para reanudar un lote interrumpido puedes añadir `--resume`: verifica los
-archivos existentes por SHA-256 (no los descarga otra vez) y omite los enlaces
-de SharePoint ya clasificados como `no_encontrado_sharepoint` o `sin_acceso_sharepoint`
-para agilizar la reanudación. Usa la ejecución normal, sin `--resume`, en las actualizaciones
-semanales para comprobar cambios remotos incluso cuando la URL siga siendo la misma.
+### Modos de sincronización
+
+| Comando | Qué hace |
+|---|---|
+| `canvas_sync.py --download` | Incremental (predeterminado). Reusa copias verificadas, descarga solo lo nuevo o modificado según la API de Canvas y omite los enlaces SharePoint ya clasificados como sin acceso o no encontrados. También sirve para reanudar un lote interrumpido. |
+| `canvas_sync.py --download --recheck-unavailable` | Igual, pero vuelve a comprobar los enlaces SharePoint sin acceso o no encontrados. |
+| `canvas_sync.py --download --force` | Descarga de nuevo **todos** los archivos y vuelve a comprobar SharePoint. Es lento y repetitivo: úsalo solo si se pide explícitamente o si sospechas de copias locales incorrectas. |
+
+SharePoint no ofrece metadatos fiables de modificación: un PDF de SharePoint ya
+verificado no se vuelve a descargar salvo con `--force`. Sin `--download`, las
+referencias a copias locales verificadas se conservan en `recursos.json`.
+`--resume` se mantiene por compatibilidad y equivale al modo predeterminado.
 
 No recorre todavía archivos fuera de módulos ni enlaces dentro de los cuerpos
 de páginas/tareas. No descarga participaciones, respuestas de cuestionarios ni
@@ -186,14 +194,9 @@ Agregar algo a `.gitignore` no lo elimina de commits anteriores.
 ```
 
 Las pruebas locales cubren paginación, aislamiento de hosts, HTML de login,
-rutas, validación PDF y versiones. La autenticación real requiere tu cuenta.
+rutas, validación PDF, versiones y sincronización incremental. La autenticación real requiere tu cuenta.
 
 Documentación: [SeleniumBase](https://seleniumbase.io/),
 [Canvas API](https://developerdocs.instructure.com/services/canvas),
 [Chrome Download Behavior](https://chromedevtools.github.io/devtools-protocol/tot/Browser/#method-setDownloadBehavior).
-
-
-
-.\.venv\Scripts\python.exe canvas_sync.py --download --resume
-.\.venv\Scripts\python.exe consolidar_pdfs.py
 

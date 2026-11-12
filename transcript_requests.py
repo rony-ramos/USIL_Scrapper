@@ -1,6 +1,9 @@
 """Importar cURL reales de VTT: solicitudes solo en memoria, nunca como comandos."""
 from datetime import datetime
+import glob
 import hashlib
+import json
+from pathlib import Path
 import re
 import shlex
 from urllib.parse import parse_qs, urlsplit
@@ -106,6 +109,25 @@ def associate_pending(context, dry_run=False):
                     digest = hashlib.sha256(original.read_bytes()).hexdigest()
                     if digest != transcript['sha256']:
                         raise ValueError('Original VTT modificado; no asociar automaticamente')
+                same = {t['sha256']: t for t in row.get('transcripts', [])}
+                if all(s['sha256'] in same for s in source['transcripts']):
+                    # Mismo contenido ya vinculado: la captura verifica su procedencia, no se duplica.
+                    reports.append({'id': source['id'], 'status': 'duplicate', 'class_id': row['id']})
+                    if not dry_run:
+                        for s in source['transcripts']:
+                            entry = same[s['sha256']]
+                            entry.setdefault('recording_reference', reference)
+                            proof = {'method': 'same_sha256_as_verified_viewer_source',
+                                     'source_manifest_path': source_path.relative_to(root).as_posix()}
+                            if proof not in entry.setdefault('verified_by', []):
+                                entry['verified_by'].append(proof)
+                        write_json(class_path, row)
+                        source.update(status='duplicate', associated_class_id=row['id'],
+                                      association_method='verified_viewer_reference_same_sha256',
+                                      started_at_utc=row['started_at_utc'])
+                        source.pop('association_pending_reason', None)
+                        write_json(source_path, source)
+                    continue
                 reports.append({'id': source['id'], 'status': 'associated', 'class_id': row['id']})
                 if not dry_run:
                     for transcript in source['transcripts']:
@@ -137,6 +159,29 @@ def associate_pending(context, dry_run=False):
     return reports
 
 
+def store_unassigned(context, task, body, acquisition, index):
+    """Guarda un VTT sin fecha; la asociacion posterior usa solo la referencia del visor."""
+    cues = parse_vtt(body)
+    folder = context['root'] / 'transcripciones-sin-fecha' / task['id']
+    original = folder / 'fuentes' / 'original.vtt'
+    path = folder / 'fuente.json'
+    manifest = load_json(path, {'schema_version': 1, 'status': 'pending_date'})
+    if task['reference'] and manifest.get('recording_reference') not in (None, task['reference']):
+        raise ValueError('La referencia del VTT cambio; revisar la asociacion antes de importar')
+    previous_hashes = {t['sha256'] for t in manifest.get('transcripts', [])}
+    status, digest = archive_text(original, body)
+    manifest.update(id=task['id'], course_id=context['course']['id'], acquisition=acquisition)
+    if previous_hashes and digest not in previous_hashes:
+        manifest['status'] = 'pending_date'
+    if task['reference']:
+        manifest['recording_reference'] = task['reference']
+    manifest.setdefault('batch_position', index)
+    manifest['transcripts'] = [{'id': task['id'], 'path': original.relative_to(context['root']).as_posix(),
+        'sha256': digest, 'cue_count': len(cues), 'status': 'disponible', 'acquisition': acquisition}]
+    write_json(path, manifest)
+    return {'id': task['id'], 'status': status, 'cue_count': len(cues)}
+
+
 def import_curls(context, text, dry_run=False):
     tasks = parse_curls(text)  # Validar todo antes de enviar la primera solicitud.
     if dry_run:
@@ -151,26 +196,55 @@ def import_curls(context, text, dry_run=False):
                         reports.append({'id': task['id'], 'status': 'pending', 'http': response.status_code})
                         continue
                     body = response.content.decode('utf-8')
-                cues = parse_vtt(body)
-                folder = context['root'] / 'transcripciones-sin-fecha' / task['id']
-                original = folder / 'fuentes' / 'original.vtt'
-                path = folder / 'fuente.json'
-                manifest = load_json(path, {'schema_version': 1, 'status': 'pending_date'})
-                if task['reference'] and manifest.get('recording_reference') not in (None, task['reference']):
-                    raise ValueError('La referencia del VTT cambio; revisar la asociacion antes de importar')
-                previous_hashes = {t['sha256'] for t in manifest.get('transcripts', [])}
-                status, digest = archive_text(original, body)
-                manifest.update(id=task['id'], course_id=context['course']['id'], acquisition='provided_curl')
-                if previous_hashes and digest not in previous_hashes:
-                    manifest['status'] = 'pending_date'
-                if task['reference']:
-                    manifest['recording_reference'] = task['reference']
-                manifest.setdefault('batch_position', index)
-                manifest['transcripts'] = [{'id': task['id'], 'path': original.relative_to(context['root']).as_posix(),
-                    'sha256': digest, 'cue_count': len(cues), 'status': 'disponible', 'acquisition': 'provided_curl'}]
-                write_json(path, manifest)
-                reports.append({'id': task['id'], 'status': status, 'cue_count': len(cues)})
+                reports.append(store_unassigned(context, task, body, 'provided_curl', index))
             except Exception as exc:
                 # Los errores requests pueden incluir URL firmada: no persistir str(exc).
                 reports.append({'id': task['id'], 'status': 'pending', 'error_type': type(exc).__name__})
+    return reports
+
+
+CAPTURE_SCHEMA = 'zoom-vtt-capture'
+
+
+def load_capture(path):
+    """Archivo generado en el navegador: VTT y hashes, sin URLs, cookies ni tokens."""
+    data = json.loads(Path(path).read_text('utf-8-sig'))
+    if not isinstance(data, dict) or data.get('schema') != CAPTURE_SCHEMA or data.get('version') != 1:
+        raise ValueError(f'{Path(path).name}: no es una captura {CAPTURE_SCHEMA} v1')
+    reference = data.get('recording_reference')
+    if (not isinstance(data.get('id'), str) or not re.fullmatch(r'[0-9a-f]{20}', data['id'])
+            or not isinstance(reference, dict) or reference.get('method') != 'observed_viewer_path_sha256'
+            or not isinstance(reference.get('sha256'), str) or not re.fullmatch(r'[0-9a-f]{64}', reference['sha256'])
+            or not isinstance(data.get('vtt'), str)):
+        raise ValueError(f'{Path(path).name}: captura incompleta o alterada')
+    parse_vtt(data['vtt'])
+    return {'id': data['id'], 'body': data['vtt'],
+            'reference': {'method': reference['method'], 'sha256': reference['sha256']}}
+
+
+def expand_paths(patterns):
+    paths = []
+    for pattern in patterns:
+        matches = sorted(glob.glob(pattern)) if glob.has_magic(pattern) else [pattern]
+        if not matches:
+            raise ValueError(f'Sin archivos para {pattern}')
+        paths.extend(Path(p) for p in matches)
+    return list(dict.fromkeys(paths))
+
+
+def import_captures(context, patterns, dry_run=False):
+    tasks = [load_capture(p) for p in expand_paths(patterns)]  # Validar el lote completo primero.
+    bodies = {}
+    for task in tasks:
+        if bodies.setdefault(task['id'], task['body']) != task['body']:
+            raise ValueError(f'Capturas distintas con el mismo id {task["id"]}; revisar antes de importar')
+    tasks = list({t['id']: t for t in tasks}.values())
+    if dry_run:
+        return [{'id': t['id'], 'status': 'preview'} for t in tasks]
+    reports = []
+    for index, task in enumerate(tasks, 1):
+        try:
+            reports.append(store_unassigned(context, task, task['body'], 'browser_capture', index))
+        except Exception as exc:
+            reports.append({'id': task['id'], 'status': 'pending', 'error_type': type(exc).__name__})
     return reports

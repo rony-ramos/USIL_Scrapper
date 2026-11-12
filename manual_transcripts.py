@@ -2,7 +2,9 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from knowledge_core import load_json, parse_vtt, recording_identity, save_transcript
+from canvas_sync import write_json
+from knowledge_core import inside, load_json, parse_vtt, recording_identity, save_transcript
+from piloto import sha256
 
 
 def manual_recording(context, started_at=None, class_id=None, meeting_id=None, topic=None,
@@ -59,6 +61,62 @@ def import_vtt(context, path, *, started_at=None, class_id=None, meeting_id=None
     if dry_run:
         return {'class_id': recording['class_id'], 'cue_count': len(cues), 'status': 'preview'}
     return save_transcript(context, recording, body)
+
+
+def merge_classes(context, source_id, target_id, dry_run=False):
+    """Unifica una clase manual con la clase inventariada por Zoom de la misma sesion.
+
+    Los originales y resultados procesados conservan sus rutas: la clase de origen se
+    retira como clase.unificada.json y sus transcripciones apuntan a esa carpeta.
+    """
+    if source_id == target_id:
+        raise ValueError('Origen y destino deben ser clases distintas')
+    root = context['root']
+    found = {}
+    for path in root.glob('semanas/*/clases/*/clase.json'):
+        row = load_json(path, {})
+        if row.get('id') in (source_id, target_id):
+            found[row['id']] = (path, row)
+    if source_id not in found or target_id not in found:
+        raise ValueError('ID de clase desconocido; consulta indice.md o pendientes.md')
+    (source_path, source), (target_path, target) = found[source_id], found[target_id]
+    if source.get('zoom_detail'):
+        raise ValueError('La clase de origen tiene metadatos de Zoom; solo se unifican clases manuales')
+    if (source.get('meeting_id'), source.get('started_at_utc')) != (target.get('meeting_id'), target.get('started_at_utc')):
+        raise ValueError('Las clases no comparten reunion e inicio; revisar manualmente')
+    target_ids = {t['id']: t for t in target.get('transcripts', [])}
+    moved = []
+    for transcript in source.get('transcripts', []):
+        original = inside(root, transcript['path'])
+        if not original.is_file() or sha256(original) != transcript['sha256']:
+            raise ValueError('Original VTT ausente o modificado; no unificar')
+        if transcript['id'] in target_ids and target_ids[transcript['id']]['sha256'] != transcript['sha256']:
+            raise ValueError('La clase destino tiene otra version de la misma transcripcion')
+        moved.append(transcript)
+    retired = source_path.with_name('clase.unificada.json')
+    report = {'source': source_id, 'target': target_id, 'transcripts': len(moved), 'status': 'preview' if dry_run else 'merged'}
+    if dry_run:
+        return report
+    for transcript in moved:
+        entry = dict(transcript)
+        # agent_tasks ubica los resultados por la carpeta de este manifest: se reusan.
+        entry.setdefault('processing_manifest_path', retired.relative_to(root).as_posix())
+        entry['merged_from_class_id'] = source_id
+        target_ids[entry['id']] = entry
+    target['transcripts'] = list(target_ids.values())
+    relations_path = root / 'relaciones-manuales.json'
+    relations = load_json(relations_path, context['manual'])
+    classes = relations.setdefault('classes', {})
+    if source_id in classes:
+        pdf_ids = classes.setdefault(target_id, {}).setdefault('pdf_ids', [])
+        pdf_ids.extend(p for p in classes.pop(source_id).get('pdf_ids', []) if p not in pdf_ids)
+        write_json(relations_path, relations)
+        context['manual'] = relations
+    write_json(target_path, target)
+    write_json(retired, {**source, 'merged_into_class_id': target_id,
+                         'merged_at': datetime.now(timezone.utc).isoformat()})
+    source_path.unlink()
+    return report
 
 
 def import_manifest(context, path, dry_run=False):

@@ -17,7 +17,7 @@ VIEWER = 'https://us02web.zoom.us/rec/play/observed-viewer'
 CURL = f"curl --url '{URL}' \\\n  -H 'referer: {VIEWER}' \\\n  -b 'session=example-secret'"
 
 
-class TranscriptRequestTests(unittest.TestCase):
+class ZoomFixtures:
     def import_one(self, ctx, raw=CURL, body=VTT):
         with patch('transcript_requests.requests.Session') as factory:
             session = factory.return_value.__enter__.return_value
@@ -36,6 +36,8 @@ class TranscriptRequestTests(unittest.TestCase):
         folder, manifest = save_recording(ctx, {**record, 'zoom_detail': recording_file_metadata(payload, record)})
         return folder, manifest
 
+
+class TranscriptRequestTests(ZoomFixtures, unittest.TestCase):
     def test_windows_and_posix_curl_are_parsed_as_data_and_dry_run_has_no_secrets(self):
         windows = f'curl --url ^"{URL}^" ^\n -H ^"referer: {VIEWER}^" ^\n -b ^"session=example-secret^" ]'
         self.assertEqual(parse_curls(windows), parse_curls(CURL))
@@ -125,6 +127,126 @@ class TranscriptRequestTests(unittest.TestCase):
                 self.assertEqual(import_curls(ctx, CURL)[0]['http'], 302)
                 self.assertFalse(session.get.call_args.kwargs['allow_redirects'])
             self.assertFalse(ctx['root'].exists())
+
+
+class BrowserCaptureTests(ZoomFixtures, unittest.TestCase):
+    """Capturas zoom-vtt-*.json: mismo id y referencia que un cURL del mismo visor."""
+
+    def capture(self, folder, name='zoom-vtt-a.json', **changes):
+        import hashlib
+        from zoom_capture import viewer_reference
+        data = {'schema': 'zoom-vtt-capture', 'version': 1,
+                'id': hashlib.sha256(b'observed-fid').hexdigest()[:20],
+                'recording_reference': viewer_reference(VIEWER),
+                'captured_at': '2026-11-11T00:00:00Z', 'vtt': VTT}
+        data.update(changes)
+        path = Path(folder) / name
+        path.write_text(json.dumps(data), encoding='utf-8')
+        return path
+
+    def test_capture_matches_curl_identity_and_associates(self):
+        from transcript_requests import import_captures
+        with tempfile.TemporaryDirectory() as folder:
+            ctx = context(Path(folder) / 'kb')
+            self.import_one(ctx)
+            report = import_captures(ctx, [str(self.capture(folder))])
+            self.assertEqual(report[0]['status'], 'sin_cambios')
+            self.assertEqual(len(list(ctx['root'].glob('transcripciones-sin-fecha/*'))), 1)
+            source = load_json(next(ctx['root'].glob('transcripciones-sin-fecha/*/fuente.json')))
+            self.assertEqual(source['acquisition'], 'browser_capture')
+            self.metadata(ctx)
+            self.assertEqual(associate_pending(ctx)[0]['status'], 'associated')
+
+    def test_glob_and_duplicates_import_once(self):
+        from transcript_requests import import_captures
+        with tempfile.TemporaryDirectory() as folder:
+            ctx = context(Path(folder) / 'kb')
+            self.capture(folder, 'zoom-vtt-a.json'); self.capture(folder, 'zoom-vtt-a (1).json')
+            report = import_captures(ctx, [str(Path(folder) / 'zoom-vtt-*.json')])
+            self.assertEqual(len(report), 1)
+            original = next(ctx['root'].glob('transcripciones-sin-fecha/*/fuentes/original.vtt'))
+            self.assertEqual(original.read_bytes(), VTT.encode())
+
+    def test_invalid_capture_rejects_whole_batch_before_writing(self):
+        from transcript_requests import import_captures
+        with tempfile.TemporaryDirectory() as folder:
+            ctx = context(Path(folder) / 'kb')
+            good = self.capture(folder)
+            for bad in ({'vtt': '<html>login</html>'}, {'id': 'NOT-HEX'}, {'schema': 'otro'},
+                        {'recording_reference': {'method': 'url', 'sha256': VIEWER}}):
+                path = self.capture(folder, 'zoom-vtt-bad.json', **bad)
+                with self.assertRaises(ValueError):
+                    import_captures(ctx, [str(good), str(path)])
+                self.assertFalse(ctx['root'].exists())
+
+    def duplicate_setup(self, folder):
+        """VTT importado a mano antes de los metadatos de Zoom: dos clases de la misma sesion."""
+        ctx = context(Path(folder) / 'kb')
+        original = Path(folder) / 'manual.vtt'
+        original.write_bytes(VTT.encode())
+        manual = import_vtt(ctx, original, started_at='2026-10-07T19:03:53-05:00', meeting_id='123456789')
+        manual_folder = next(p.parent for p in ctx['root'].glob('semanas/*/clases/*/clase.json')
+                             if load_json(p)['id'] == manual['class_id'])
+        processed = manual_folder / 'procesado' / 'transcripciones' / 'x' / 'y' / 'z'
+        write_json(processed / 'estado.json', {'status': 'partial'})
+        zoom_folder, zoom = self.metadata(ctx)
+        write_json(ctx['root'] / 'grabaciones.json', [{'class_id': zoom['id'], 'status': 'metadata_captured',
+                                                       'transcript_status': 'pending_import'}])
+        return ctx, manual['class_id'], manual_folder, zoom['id'], zoom_folder
+
+    def test_merge_manual_duplicate_keeps_originals_and_capture_becomes_provenance(self):
+        from manual_transcripts import merge_classes
+        from transcript_requests import import_captures
+        with tempfile.TemporaryDirectory() as folder:
+            ctx, manual_id, manual_folder, zoom_id, zoom_folder = self.duplicate_setup(folder)
+            self.assertIn('posible duplicado', ' '.join(organize(ctx, dry_run=True)['pending']))
+            import_captures(ctx, [str(self.capture(folder))])
+            self.assertIn('asociacion_existente', associate_pending(ctx)[0]['reason'])
+            self.assertEqual(merge_classes(ctx, manual_id, zoom_id, dry_run=True)['status'], 'preview')
+            self.assertTrue((manual_folder / 'clase.json').exists())
+            merge_classes(ctx, manual_id, zoom_id)
+            self.assertFalse((manual_folder / 'clase.json').exists())
+            self.assertEqual(load_json(manual_folder / 'clase.unificada.json')['merged_into_class_id'], zoom_id)
+            report = associate_pending(ctx)
+            self.assertEqual(report[0]['status'], 'duplicate')
+            row = load_json(zoom_folder / 'clase.json')
+            self.assertEqual(len(row['transcripts']), 1)
+            entry = row['transcripts'][0]
+            self.assertEqual(entry['acquisition'], 'manual_vtt')
+            self.assertTrue(entry['path'].startswith(manual_folder.relative_to(ctx['root']).as_posix()))
+            self.assertEqual(entry['processing_manifest_path'],
+                             (manual_folder / 'clase.unificada.json').relative_to(ctx['root']).as_posix())
+            self.assertEqual(entry['recording_reference']['method'], 'observed_viewer_path_sha256')
+            self.assertEqual(len(entry['verified_by']), 1)
+            self.assertEqual(load_json(ctx['root'] / 'grabaciones.json')[0]['transcript_status'], 'imported')
+            self.assertEqual(associate_pending(ctx), [])
+            summary = organize(ctx, dry_run=True)
+            self.assertEqual(summary['classes'], 1)
+            self.assertEqual(summary['unassigned_transcripts'], 0)
+            self.assertNotIn('posible duplicado', ' '.join(summary['pending']))
+            self.assertTrue((manual_folder / 'procesado' / 'transcripciones' / 'x' / 'y' / 'z' / 'estado.json').exists())
+
+    def test_merge_refuses_zoom_source_or_different_session(self):
+        from manual_transcripts import merge_classes
+        with tempfile.TemporaryDirectory() as folder:
+            ctx, manual_id, manual_folder, zoom_id, _ = self.duplicate_setup(folder)
+            with self.assertRaisesRegex(ValueError, 'metadatos de Zoom'):
+                merge_classes(ctx, zoom_id, manual_id)
+            row = load_json(manual_folder / 'clase.json')
+            row['started_at_utc'] = '2026-10-09T00:03:53+00:00'
+            write_json(manual_folder / 'clase.json', row)
+            with self.assertRaisesRegex(ValueError, 'no comparten'):
+                merge_classes(ctx, manual_id, zoom_id)
+            self.assertTrue((manual_folder / 'clase.json').exists())
+
+    def test_conflicting_captures_with_same_id_are_rejected(self):
+        from transcript_requests import import_captures
+        with tempfile.TemporaryDirectory() as folder:
+            ctx = context(Path(folder) / 'kb')
+            a = self.capture(folder, 'a.json')
+            b = self.capture(folder, 'b.json', vtt=VTT.replace('neuron', 'cambio'))
+            with self.assertRaises(ValueError):
+                import_captures(ctx, [str(a), str(b)])
 
 
 if __name__ == '__main__':

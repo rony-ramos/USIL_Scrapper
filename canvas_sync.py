@@ -202,7 +202,34 @@ def active_courses(api, period=None):
     return courses
 
 
-def sync(driver, api, root, selected, download, config, courses=None, resume=False):
+UNAVAILABLE = ('no_encontrado_sharepoint', 'sin_acceso_sharepoint')
+
+
+def remote_metadata(detail):
+    """Metadatos publicos de un archivo Canvas; nunca incluye la URL firmada."""
+    return {k: detail.get(k) for k in ('filename', 'size', 'updated_at', 'modified_at')}
+
+
+def verified_local(root, old, item):
+    """Copia local registrada, dentro de la biblioteca y con el SHA-256 esperado."""
+    if not old.get('sha256') or not old.get('path'):
+        return False
+    if old.get('external_url') != item.get('external_url') or old.get('content_id') != item.get('content_id'):
+        return False
+    path = (root / old['path']).resolve()
+    return path.is_relative_to(root.resolve()) and path.is_file() and sha256(path) == old['sha256']
+
+
+def unchanged_remote(root, old, remote):
+    """Sin metadatos previos, el tamano exacto permite adoptar la copia una sola vez."""
+    if old.get('remote'):
+        return old['remote'] == remote
+    size = remote.get('size')
+    return isinstance(size, int) and size == (root / old['path']).stat().st_size
+
+
+def sync(driver, api, root, selected, download, config, courses=None, force=False, recheck_unavailable=False):
+    """Incremental por defecto: reusa copias verificadas; force vuelve a descargar todo."""
     courses = courses if courses is not None else active_courses(api, config.get('current_period'))
     hosts = {urlsplit(api.base_url).hostname, *config['sharepoint_hosts'], *config['download_hosts']}
     public_fields = ('id', 'name', 'course_code', 'enrollment_term_id', 'access_restricted_by_date')
@@ -220,7 +247,7 @@ def sync(driver, api, root, selected, download, config, courses=None, resume=Fal
                 continue
             folder = course_folder(root, course)
             prior = {}
-            if resume and (folder / 'recursos.json').exists():
+            if not force and (folder / 'recursos.json').exists():
                 prior = {r['id']: r for r in json.loads((folder / 'recursos.json').read_text('utf-8'))}
             try:
                 modules = api.all(f'/api/v1/courses/{cid}/modules?per_page=100')
@@ -237,17 +264,19 @@ def sync(driver, api, root, selected, download, config, courses=None, resume=Fal
                         directory = folder / component(mod['name']) / week
                         try:
                             old = prior.get(item['id'], {})
-                            old_path = (root / old.get('path', '')).resolve()
-                            if (resume and old.get('status') in ('no_encontrado_sharepoint', 'sin_acceso_sharepoint')
+                            if (not recheck_unavailable and old.get('status') in UNAVAILABLE
                                     and old.get('external_url') == item.get('external_url')):
                                 record.update(status=old['status'], message=old.get('message', ''), checked_at=old.get('checked_at'))
                                 records.append(record)
                                 continue
-                            if (resume and old.get('sha256') and old.get('external_url') == item.get('external_url')
-                                    and old.get('content_id') == item.get('content_id')
-                                    and old_path.is_relative_to(root.resolve()) and old_path.is_file()
-                                    and sha256(old_path) == old['sha256']):
-                                record.update(status='existente_verificado', path=old['path'], sha256=old['sha256'])
+                            local_ok = verified_local(root, old, item)
+                            reused = dict(status='existente_verificado', path=old.get('path'), sha256=old.get('sha256'))
+                            if old.get('remote'):
+                                reused['remote'] = old['remote']
+                            # SharePoint no expone metadatos fiables: una copia verificada se reusa.
+                            # Sin --download tampoco se pierde la referencia a la copia local.
+                            if local_ok and (item['type'] != 'File' or not download):
+                                record.update(reused)
                                 records.append(record)
                                 continue
                             typ = item['type']
@@ -261,11 +290,17 @@ def sync(driver, api, root, selected, download, config, courses=None, resume=Fal
                                 record['status'] = 'contenido_guardado'
                             elif typ == 'File' and download:
                                 detail, _ = api.get(f"/api/v1/files/{item['content_id']}")
-                                # El endpoint proviene de la API autenticada de Canvas.
-                                file_hosts = hosts | {urlsplit(detail['url']).hostname}
-                                path = directory / (str(item['id']) + '-' + component(detail['filename']))
-                                record['status'], record['sha256'] = stream_file(api.session, detail['url'], path, file_hosts)
-                                record['path'] = str(path.relative_to(root))
+                                remote = remote_metadata(detail)
+                                if local_ok and unchanged_remote(root, old, remote):
+                                    # Metadatos de la API sin cambios: no se descarga de nuevo.
+                                    record.update(reused, remote=remote)
+                                else:
+                                    # El endpoint proviene de la API autenticada de Canvas.
+                                    file_hosts = hosts | {urlsplit(detail['url']).hostname}
+                                    path = directory / (str(item['id']) + '-' + component(detail['filename']))
+                                    record['status'], record['sha256'] = stream_file(api.session, detail['url'], path, file_hosts)
+                                    record['path'] = str(path.relative_to(root))
+                                    record['remote'] = remote
                             elif typ == 'ExternalUrl':
                                 host = urlsplit(item['external_url']).hostname or ''
                                 record['status'] = 'pendiente_conector' if '.' in host else 'enlace_incompleto'
@@ -334,6 +369,7 @@ def retry_files(api, root, selected, config, courses=None):
                 path = folder / component(record['module']) / component(record['week']) / (str(record['id']) + '-' + component(detail['filename']))
                 record['status'], record['sha256'] = stream_file(api.session, detail['url'], path, hosts | {record['download_host']})
                 record['path'] = str(path.relative_to(root))
+                record['remote'] = remote_metadata(detail)
                 record.pop('error_type', None)
                 record.pop('reason', None)
             except Exception as exc:
@@ -363,8 +399,17 @@ def main():
     parser.add_argument('--period', help='Periodo vigente segun el nombre del curso (AAAA-NN); prevalece sobre current_period')
     parser.add_argument('--list-courses', action='store_true')
     parser.add_argument('--retry-files', action='store_true', help='Reintentar solo archivos Canvas pendientes del inventario local')
-    parser.add_argument('--resume', action='store_true', help='Reusar archivos locales verificados de un lote interrumpido; no comprueba cambios remotos de esos archivos')
+    parser.add_argument('--force', action='store_true',
+                        help='Descargar de nuevo todos los archivos y volver a comprobar SharePoint (costoso; solo si se pide)')
+    parser.add_argument('--recheck-unavailable', action='store_true',
+                        help='Volver a comprobar enlaces SharePoint sin acceso o no encontrados, sin descargar lo ya verificado')
+    # Compatibilidad: el modo incremental ahora es el predeterminado.
+    parser.add_argument('--resume', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.force and args.resume:
+        parser.error('--force y --resume son incompatibles')
+    if args.resume:
+        print('--resume ya no es necesario: la sincronizacion es incremental por defecto.', flush=True)
     from seleniumbase import Driver
     config = load_settings(args.config)
     period = args.period if args.period is not None else config.get('current_period')
@@ -405,7 +450,8 @@ def main():
                     else:
                         if not selected & {r['id'] for r in rows}:
                             raise ValueError('Ningun ID seleccionado corresponde a un curso activo del periodo')
-                        sync(driver, api, root, selected, args.download, config, courses=rows, resume=args.resume)
+                        sync(driver, api, root, selected, args.download, config, courses=rows,
+                             force=args.force, recheck_unavailable=args.force or args.recheck_unavailable)
                     return
                 except AccessError:
                     pass
