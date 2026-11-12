@@ -9,6 +9,7 @@
   "pilot_file": "piloto.json",
   "sharepoint_hosts": ["universidad-my.sharepoint.com"],
   "download_hosts": [],
+  "download_host_suffixes": [],
   "update_mode": "manual",
   "agents": {
     "command": "agy",

@@ -168,6 +168,27 @@ adaptador anterior no abre reproductores. La captura se hace en el navegador
 habitual del usuario, con su sesion, mediante
 [`herramientas/zoom-vtt-capture.js`](../herramientas/zoom-vtt-capture.js):
 
+### Configuracion unica de la bandeja
+
+```powershell
+.\.venv\Scripts\python.exe conocimiento.py --init-capture-inbox
+```
+
+Crea `conocimiento/entrada-capturas/` con el marcador `.usil-zoom-capture-inbox`.
+La primera vez que ejecutes el script en un reproductor aparece el boton
+**Elegir bandeja de capturas**: pulsalo y elige esa carpeta (no otra; el script
+rechaza carpetas sin el marcador). En una visita posterior Chrome mostrara
+**Autorizar bandeja de capturas**; pulsalo y elige **Permitir en cada visita**.
+Desde entonces el script escribe sin dialogos ni clics, tambien cuando lo
+ejecuta un agente. Si Chrome retira el permiso (por ejemplo al borrar los datos
+del sitio zoom.us) el script se detiene con un motivo `..._requiere_clic_del_usuario`
+y vuelve a mostrar el boton.
+
+Solo esa carpeta queda accesible para la pagina de Zoom: no elijas la carpeta del
+proyecto ni Descargas. Python trata su contenido como datos no confiables.
+
+### Captura e importacion
+
 1. Abre la grabacion en Zoom (Canvas > Zoom > Grabaciones en la nube) y espera
    a que cargue el reproductor. Si el panel de transcripcion esta oculto, abrelo.
 2. Ejecuta el script en esa pestaña:
@@ -176,13 +197,34 @@ habitual del usuario, con su sesion, mediante
    - **Agente con tu navegador** (por ejemplo Claude in Chrome): el agente abre
      el reproductor y ejecuta el mismo script. Solo recibe el resumen (id y
      numero de segmentos), no el texto ni credenciales.
-3. El navegador descarga `zoom-vtt-<id>.json` (normalmente en Descargas).
-4. Importa las capturas; se admiten comodines:
+3. El script guarda `zoom-vtt-<id>.json` en la bandeja.
+4. Importa la bandeja. No hace falta indicar el curso: cada captura se asigna al
+   curso cuyo visor verificado coincide.
 
 ```powershell
-.\.venv\Scripts\python.exe conocimiento.py --course $cursoId --import-capture "$HOME\Downloads\zoom-vtt-*.json" --dry-run
-.\.venv\Scripts\python.exe conocimiento.py --course $cursoId --import-capture "$HOME\Downloads\zoom-vtt-*.json"
+.\.venv\Scripts\python.exe conocimiento.py --import-inbox --dry-run
+.\.venv\Scripts\python.exe conocimiento.py --import-inbox
 ```
+
+Las importadas pasan a `importadas/` y las invalidas a `rechazadas/`. Para un
+archivo suelto sigue disponible `--course ID --import-capture RUTA`.
+
+Las capturas v2 incluyen los metadatos que el reproductor ya obtuvo (`play/info`):
+hashes de la ocurrencia y del archivo, inicio UTC, duracion y tema de la reunion.
+No hace falta `--sync-zoom`: si la clase no existe se crea con la misma identidad
+que usa la sincronizacion por listado (hash de la ocurrencia), y si existe se
+completa sin duplicarla. El curso se determina por la referencia del visor o, si
+aun no se conoce, porque el tema coincide exactamente con el nombre del curso en
+`biblioteca/cursos.json`; si no coincide queda `sin_metadatos_zoom` en la bandeja.
+Una grabacion sin transcripcion (por ejemplo un examen) responde
+`grabacion_sin_transcripcion` y no escribe nada.
+
+Para actualizar solo lo reciente, abre unicamente las grabaciones de las ultimas
+dos semanas cuya transcripcion aun no figure como `imported` en `grabaciones.json`.
+Repetir una captura no duplica nada: se reporta `sin_cambios`.
+
+El script lee el VTT preferentemente de la cache del navegador (`force-cache`),
+asi que normalmente no repite la solicitud que ya hizo el reproductor.
 
 El script solo reutiliza la solicitud VTT que el reproductor ya hizo: no
 construye URLs ni tokens y no lee cookies; el navegador agrega su propia sesion.
@@ -190,7 +232,7 @@ La captura contiene el VTT original, el SHA-256 del path del visor y un id
 derivado del `fid`; no contiene URLs, cookies ni cabeceras. Usa el mismo id y la
 misma referencia que el import por cURL, asi que repetir una captura no duplica
 la transcripcion y la asociacion con la clase funciona igual. El lote se valida
-completo antes de escribir. Despues de importar puedes borrar las capturas.
+completo antes de escribir.
 
 Si el script informa `vtt_no_observado...`, abre el panel de transcripcion,
 espera a que cargue y vuelve a ejecutarlo. Si Zoom cierra la sesion o pide una

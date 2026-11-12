@@ -250,5 +250,75 @@ class IncrementalSyncTests(unittest.TestCase):
         driver.get.assert_not_called()
 
 
+class HostPolicyTests(unittest.TestCase):
+    def test_suffix_allows_only_subdomains_of_that_exact_domain(self):
+        from canvas_sync import HostPolicy
+        policy = HostPolicy({'campus.example.com'}, ['cluster9.files.example.net']) | {'cdn.example.org'}
+        for host in ('campus.example.com', 'cdn.example.org', 'a1-22.cluster9.files.example.net'):
+            self.assertIn(host, policy)
+        for host in ('cluster9.files.example.net', 'evilcluster9.files.example.net', 'cluster9.files.example.net.evil.com',
+                     'a1.cluster8.files.example.net', '', None):
+            self.assertNotIn(host, policy)
+
+    def test_settings_reject_broad_suffixes(self):
+        from settings import load_settings
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'c.json'
+            for bad in (['example.net'], ['*.example.net'], ['.files.example.net'], ['files.example.net/x']):
+                path.write_text(json.dumps({'canvas_url': 'https://campus.example.com', 'download_host_suffixes': bad}), encoding='utf-8')
+                with self.assertRaises(ValueError):
+                    load_settings(path)
+            path.write_text(json.dumps({'canvas_url': 'https://campus.example.com',
+                                        'download_host_suffixes': ['cluster9.files.example.net']}), encoding='utf-8')
+            self.assertEqual(load_settings(path)['download_host_suffixes'], ['cluster9.files.example.net'])
+
+
+class DeduplicationTests(unittest.TestCase):
+    def test_identical_files_become_hardlinks_and_record_duplicate_of(self):
+        import os
+        from canvas_sync import deduplicate
+        from piloto import sha256
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            a = course_folder(root, {'id': 1, 'name': 'A - 2026-02'})
+            b = course_folder(root, {'id': 2, 'name': 'B - 2026-02'})
+            content, other = pdf_bytes(1), pdf_bytes(2)
+            files = {a / 'U1' / '5-x.pdf': content, b / 'U2' / '7-x.pdf': content, b / 'U2' / '8-y.pdf': other}
+            for path, data in files.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+            rel = lambda p: str(p.relative_to(root))
+            write_json(a / 'recursos.json', [{'id': 5, 'path': rel(a / 'U1' / '5-x.pdf'), 'sha256': sha256(a / 'U1' / '5-x.pdf')}])
+            write_json(b / 'recursos.json', [{'id': 7, 'path': rel(b / 'U2' / '7-x.pdf'), 'sha256': sha256(b / 'U2' / '7-x.pdf')},
+                                             {'id': 8, 'path': rel(b / 'U2' / '8-y.pdf'), 'sha256': sha256(b / 'U2' / '8-y.pdf')}])
+            report = deduplicate(root, [a, b])
+            self.assertEqual((report['duplicates'], report['linked']), (1, 1))
+            self.assertTrue(os.path.samefile(a / 'U1' / '5-x.pdf', b / 'U2' / '7-x.pdf'))
+            self.assertEqual((b / 'U2' / '7-x.pdf').read_bytes(), content)
+            records = {r['id']: r for r in json.loads((b / 'recursos.json').read_text('utf-8'))}
+            self.assertEqual(records[7]['duplicate_of'], Path(rel(a / 'U1' / '5-x.pdf')).as_posix())
+            self.assertNotIn('duplicate_of', records[8])
+            self.assertNotIn('duplicate_of', json.loads((a / 'recursos.json').read_text('utf-8'))[0])
+            again = deduplicate(root, [a, b])
+            self.assertEqual((again['duplicates'], again['linked']), (1, 0))
+
+    def test_modified_file_is_not_linked(self):
+        import os
+        from canvas_sync import deduplicate
+        from piloto import sha256
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            a = course_folder(root, {'id': 1, 'name': 'A - 2026-02'})
+            for name in ('1-x.pdf', '2-x.pdf'):
+                (a / name).parent.mkdir(parents=True, exist_ok=True)
+                (a / name).write_bytes(pdf_bytes(1))
+            digest = sha256(a / '1-x.pdf')
+            write_json(a / 'recursos.json', [{'id': 1, 'path': str((a / '1-x.pdf').relative_to(root)), 'sha256': digest},
+                                             {'id': 2, 'path': str((a / '2-x.pdf').relative_to(root)), 'sha256': digest}])
+            (a / '2-x.pdf').write_bytes(b'alterado')
+            self.assertEqual(deduplicate(root, [a])['linked'], 0)
+            self.assertFalse(os.path.samefile(a / '1-x.pdf', a / '2-x.pdf'))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -239,6 +239,115 @@ class BrowserCaptureTests(ZoomFixtures, unittest.TestCase):
                 merge_classes(ctx, manual_id, zoom_id)
             self.assertTrue((manual_folder / 'clase.json').exists())
 
+    def inbox_setup(self, folder):
+        from transcript_requests import init_capture_inbox
+        config = {'knowledge_root': str(Path(folder))}
+        ctx = context(Path(folder) / 'tmp')
+        ctx['root'] = Path(folder) / '2026-02' / 'agentes-99'
+        write_json(ctx['root'] / 'curso.json', {'course_id': 99})
+        self.metadata(ctx)
+        init_capture_inbox(config)
+        return config, ctx, Path(folder) / 'entrada-capturas'
+
+    def test_inbox_routes_capture_to_course_by_viewer_and_files_it_away(self):
+        from transcript_requests import import_inbox
+        with tempfile.TemporaryDirectory() as folder:
+            config, ctx, inbox = self.inbox_setup(folder)
+            self.capture(inbox, 'zoom-vtt-a.json')
+            self.capture(inbox, 'zoom-vtt-a (1).json')
+            self.capture(inbox, 'zoom-vtt-otro.json', id='b' * 20,
+                         recording_reference={'method': 'observed_viewer_path_sha256', 'sha256': 'c' * 64})
+            (inbox / 'zoom-vtt-roto.json').write_text('{"schema": "x"}', encoding='utf-8')
+            (inbox / 'notas.txt').write_text('no es captura', encoding='utf-8')
+            with patch('knowledge_core.course_context', return_value=ctx):
+                preview = import_inbox(config, dry_run=True)
+                self.assertTrue((inbox / 'zoom-vtt-a.json').exists())
+                self.assertFalse((inbox / 'rechazadas' / 'zoom-vtt-roto.json').exists())
+                report = {r['file']: r for r in import_inbox(config)}
+            self.assertEqual(len(preview), 4)
+            self.assertEqual(report['zoom-vtt-a.json']['association'], 'associated')
+            self.assertEqual(report['zoom-vtt-a.json']['course_id'], 99)
+            self.assertEqual(report['zoom-vtt-otro.json']['reason'], 'sin_metadatos_zoom')
+            self.assertEqual(report['zoom-vtt-roto.json']['status'], 'rejected')
+            self.assertEqual(sorted(p.name for p in inbox.iterdir() if p.is_file()),
+                             ['.usil-zoom-capture-inbox', 'notas.txt', 'zoom-vtt-otro.json'])
+            self.assertEqual(len(list((inbox / 'importadas').iterdir())), 2)
+            self.assertTrue((inbox / 'rechazadas' / 'zoom-vtt-roto.json').exists())
+            row = next(load_json(p) for p in ctx['root'].glob('semanas/*/clases/*/clase.json'))
+            self.assertEqual(row['transcripts'][0]['acquisition'], 'browser_capture')
+
+    def v2_capture(self, folder, name='zoom-vtt-v2.json', **recording):
+        import hashlib
+        rec = {'occurrence_sha256': hashlib.sha256(b'observed-occurrence').hexdigest(),
+               'file_id_sha256': hashlib.sha256(b'observed-file').hexdigest(), 'file_type': 'MP4',
+               'started_at_utc': '2026-10-08T00:03:53.000Z', 'duration_seconds': 10800,
+               'topic': 'Agentes - 2026-02'}
+        rec.update(recording)
+        return self.capture(folder, name, version=2, recording=rec)
+
+    def v2_setup(self, folder, with_metadata):
+        from transcript_requests import init_capture_inbox
+        config = {'knowledge_root': str(Path(folder)), 'root': str(Path(folder) / 'lib')}
+        write_json(Path(folder) / 'lib' / 'cursos.json', [{'id': 99, 'name': 'Agentes - 2026-02'},
+                                                           {'id': 100, 'name': 'Otro - 2026-02'}])
+        ctx = context(Path(folder) / 'tmp')
+        ctx['root'] = Path(folder) / '2026-02' / 'agentes-99'
+        write_json(ctx['root'] / 'curso.json', {'course_id': 99})
+        if with_metadata:
+            self.metadata(ctx)
+        init_capture_inbox(config)
+        return config, ctx, Path(folder) / 'entrada-capturas'
+
+    def test_v2_capture_creates_class_routed_by_course_name(self):
+        from transcript_requests import import_inbox
+        with tempfile.TemporaryDirectory() as folder:
+            config, ctx, inbox = self.v2_setup(folder, with_metadata=False)
+            self.v2_capture(inbox)
+            self.v2_capture(inbox, 'zoom-vtt-otro.json', id='d' * 20, topic='Curso desconocido')
+            with patch('knowledge_core.course_context', return_value=ctx):
+                report = {r['file']: r for r in import_inbox(config)}
+            self.assertEqual(report['zoom-vtt-v2.json']['association'], 'associated')
+            self.assertEqual(report['zoom-vtt-otro.json']['reason'], 'sin_metadatos_zoom')
+            rows = [load_json(p) for p in ctx['root'].glob('semanas/*/clases/*/clase.json')]
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            import hashlib
+            self.assertEqual(row['id'], hashlib.sha256(b'observed-occurrence').hexdigest()[:20])
+            self.assertEqual(row['started_at_utc'], '2026-10-08T00:03:53+00:00')
+            self.assertEqual(row['transcripts'][0]['acquisition'], 'browser_capture')
+            self.assertEqual(row['zoom_detail']['files'][0]['ended_at_utc'], '2026-10-08T03:03:53+00:00')
+            inventory = load_json(ctx['root'] / 'grabaciones.json')
+            self.assertEqual([(r['class_id'], r['transcript_status']) for r in inventory], [(row['id'], 'imported')])
+
+    def test_v2_capture_for_known_class_does_not_duplicate(self):
+        from transcript_requests import import_inbox
+        with tempfile.TemporaryDirectory() as folder:
+            config, ctx, inbox = self.v2_setup(folder, with_metadata=True)
+            before = load_json(next(ctx['root'].glob('semanas/*/clases/*/clase.json')))
+            self.v2_capture(inbox)
+            with patch('knowledge_core.course_context', return_value=ctx):
+                report = import_inbox(config)
+            self.assertEqual(report[0]['association'], 'associated')
+            rows = [load_json(p) for p in ctx['root'].glob('semanas/*/clases/*/clase.json')]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]['meeting_id'], before['meeting_id'])
+            self.assertEqual(len(rows[0]['zoom_detail']['files']), 1)
+            self.assertEqual(rows[0]['zoom_detail']['source_timezone'], 'America/Los_Angeles')
+
+    def test_v2_rejects_tampered_recording(self):
+        from transcript_requests import load_capture
+        with tempfile.TemporaryDirectory() as folder:
+            for bad in ({'occurrence_sha256': 'x'}, {'started_at_utc': '2026-10-08 00:03'}, {'duration_seconds': -5},
+                        {'file_type': 'EXE'}):
+                with self.assertRaises(ValueError):
+                    load_capture(self.v2_capture(folder, 'bad.json', **bad))
+
+    def test_inbox_requires_marker(self):
+        from transcript_requests import import_inbox
+        with tempfile.TemporaryDirectory() as folder:
+            with self.assertRaisesRegex(ValueError, 'init-capture-inbox'):
+                import_inbox({'knowledge_root': folder})
+
     def test_conflicting_captures_with_same_id_are_rejected(self):
         from transcript_requests import import_captures
         with tempfile.TemporaryDirectory() as folder:

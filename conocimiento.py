@@ -9,8 +9,12 @@ from settings import load_settings
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--course', type=int, required=True)
+    parser.add_argument('--course', type=int, help='ID Canvas del curso (no requerido para la bandeja de capturas)')
     parser.add_argument('--config')
+    parser.add_argument('--init-capture-inbox', action='store_true',
+                        help='Crear la bandeja dedicada que el navegador usa para guardar capturas')
+    parser.add_argument('--import-inbox', action='store_true',
+                        help='Importar la bandeja; cada captura va al curso cuyo visor coincide')
     parser.add_argument('--sync-zoom', action='store_true', help='Capturar solo metadatos con Selenium; las transcripciones se obtienen con --import-capture')
     manual = parser.add_mutually_exclusive_group()
     manual.add_argument('--import-vtt', help='Archivo VTT UTF-8 exportado manualmente')
@@ -39,6 +43,14 @@ def main():
     if args.sync_zoom and (args.import_vtt or args.import_manifest or args.import_curl or args.import_capture or args.merge_class):
         parser.error('Ejecuta la sincronizacion y la importacion en comandos separados')
     config = load_settings(args.config)
+    if args.init_capture_inbox or args.import_inbox:
+        from transcript_requests import import_inbox, init_capture_inbox
+        result = init_capture_inbox(config) if args.init_capture_inbox else {
+            'imports': import_inbox(config, args.dry_run)}
+        print(json.dumps(result, ensure_ascii=True, indent=2))
+        return
+    if args.course is None:
+        parser.error('--course es obligatorio salvo con --init-capture-inbox o --import-inbox')
     context = course_context(config, args.course)
     result = organize(context, dry_run=args.dry_run)
     if args.import_vtt or args.import_manifest:

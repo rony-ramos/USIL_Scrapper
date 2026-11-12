@@ -127,6 +127,24 @@ def write_json(path, value):
     os.replace(part, path)
 
 
+class HostPolicy:
+    """Hosts exactos mas sufijos explicitos (subdominios de un dominio concreto de Canvas)."""
+
+    def __init__(self, exact, suffixes=()):
+        self.exact, self.suffixes = {h for h in exact if h}, tuple(suffixes)
+
+    def __contains__(self, host):
+        return bool(host) and (host in self.exact or any(host.endswith('.' + s) for s in self.suffixes))
+
+    def __or__(self, other):
+        return HostPolicy(self.exact | set(other), self.suffixes)
+
+
+def download_policy(api, config):
+    return HostPolicy({urlsplit(api.base_url).hostname, *config['sharepoint_hosts'], *config['download_hosts']},
+                      config.get('download_host_suffixes', []))
+
+
 def stream_file(session, url, target, allowed_hosts):
     """Redirecciones HTTPS sin reenviar cookies de Canvas a otros dominios."""
     for _ in range(8):
@@ -228,10 +246,64 @@ def unchanged_remote(root, old, remote):
     return isinstance(size, int) and size == (root / old['path']).stat().st_size
 
 
+def deduplicate(root, folders):
+    """Contenido identico (mismo SHA-256) se guarda una vez: las demas rutas pasan a ser
+    enlaces duros a la copia canonica y su registro indica duplicate_of. Las rutas no cambian."""
+    root = root.resolve()
+    locations = {}
+    for index in sorted(root.glob('**/recursos.json')):
+        for record in json.loads(index.read_text('utf-8')):
+            if record.get('sha256') and record.get('path'):
+                path = (root / record['path']).resolve()
+                if path.is_relative_to(root) and path.is_file():
+                    locations.setdefault(record['sha256'], []).append(Path(record['path']).as_posix())
+    canonical = {digest: sorted(set(paths))[0] for digest, paths in locations.items()}
+    report = {'duplicates': 0, 'linked': 0, 'bytes_saved': 0}
+    for folder in folders:
+        index = folder / 'recursos.json'
+        if not index.exists():
+            continue
+        records, changed = json.loads(index.read_text('utf-8')), False
+        for record in records:
+            digest, relative = record.get('sha256'), record.get('path')
+            if not digest or not relative or digest not in canonical:
+                continue
+            own, first = Path(relative).as_posix(), canonical[digest]
+            if own == first:
+                changed |= record.pop('duplicate_of', None) is not None
+                continue
+            report['duplicates'] += 1
+            path, source = (root / own).resolve(), (root / first).resolve()
+            if not path.is_file() or not source.is_file():
+                continue
+            if not os.path.samefile(path, source):
+                if sha256(path) != digest or sha256(source) != digest:
+                    continue  # Solo se enlaza contenido verificado en este momento.
+                size = path.stat().st_size
+                temp = path.with_name(path.name + '.link')
+                if temp.exists():
+                    temp.unlink()
+                try:
+                    os.link(source, temp)
+                    os.replace(temp, path)
+                    report['linked'] += 1
+                    report['bytes_saved'] += size
+                except OSError:
+                    if temp.exists():
+                        temp.unlink()
+                    continue
+            if record.get('duplicate_of') != first:
+                record['duplicate_of'] = first
+                changed = True
+        if changed:
+            write_json(index, records)
+    return report
+
+
 def sync(driver, api, root, selected, download, config, courses=None, force=False, recheck_unavailable=False):
     """Incremental por defecto: reusa copias verificadas; force vuelve a descargar todo."""
     courses = courses if courses is not None else active_courses(api, config.get('current_period'))
-    hosts = {urlsplit(api.base_url).hostname, *config['sharepoint_hosts'], *config['download_hosts']}
+    hosts = download_policy(api, config)
     public_fields = ('id', 'name', 'course_code', 'enrollment_term_id', 'access_restricted_by_date')
     write_json(root / 'cursos.json', [{k: c[k] for k in public_fields if k in c} for c in courses])
     print(f'Cursos activos del periodo: {len(courses)}. Seleccionados: {len(selected & {c["id"] for c in courses})}.', flush=True)
@@ -344,12 +416,18 @@ def sync(driver, api, root, selected, download, config, courses=None, force=Fals
             except Exception as exc:
                 results.append({'course': cid, 'status': 'pendiente', 'error_type': type(exc).__name__})
             write_json(root / 'ultima-sincronizacion.json', results)
+        synced = [course_folder(root, c) for c in courses if c['id'] in selected and c.get('name')]
+        dedup = deduplicate(root, synced)
+        print(f"Deduplicacion: {dedup['duplicates']} duplicados, {dedup['linked']} enlazados ahora, "
+              f"{dedup['bytes_saved'] // 1_000_000} MB ahorrados.", flush=True)
+        results.append({'deduplication': dedup})
+        write_json(root / 'ultima-sincronizacion.json', results)
         db.execute('INSERT INTO runs VALUES (?,?)', (datetime.now(timezone.utc).isoformat(), json.dumps(results)))
 
 
 def retry_files(api, root, selected, config, courses=None):
     """Reintenta solo archivos Canvas pendientes sin volver a abrir SharePoint."""
-    hosts = {urlsplit(api.base_url).hostname, *config['sharepoint_hosts'], *config['download_hosts']}
+    hosts = download_policy(api, config)
     summary_path = root / 'ultima-sincronizacion.json'
     summary = json.loads(summary_path.read_text('utf-8')) if summary_path.exists() else []
     for course in courses if courses is not None else active_courses(api, config.get('current_period')):
@@ -382,7 +460,7 @@ def retry_files(api, root, selected, config, courses=None):
         from collections import Counter
         counts = dict(Counter(r['status'] for r in records))
         for row in summary:
-            if row['course'] == course['id']:
+            if row.get('course') == course['id']:
                 row['counts'] = counts
     write_json(summary_path, summary)
     with closing(sqlite3.connect(root / 'sync.sqlite3')) as db, db:
@@ -403,6 +481,8 @@ def main():
                         help='Descargar de nuevo todos los archivos y volver a comprobar SharePoint (costoso; solo si se pide)')
     parser.add_argument('--recheck-unavailable', action='store_true',
                         help='Volver a comprobar enlaces SharePoint sin acceso o no encontrados, sin descargar lo ya verificado')
+    parser.add_argument('--deduplicate', action='store_true',
+                        help='Solo deduplicar la biblioteca local de los cursos seleccionados; no abre el navegador')
     # Compatibilidad: el modo incremental ahora es el predeterminado.
     parser.add_argument('--resume', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -420,6 +500,11 @@ def main():
     selected = set(args.course or ([] if args.list_courses else json.loads(Path(config['courses_file']).read_text('utf-8-sig'))['course_ids']))
     if not args.list_courses and not selected:
         raise ValueError('Seleccion vacia: ejecuta --list-courses y configura course_ids o usa --course ID')
+    if args.deduplicate:
+        known = json.loads((root / 'cursos.json').read_text('utf-8')) if (root / 'cursos.json').exists() else []
+        folders = [course_folder(root, c) for c in known if c['id'] in selected and c.get('name')]
+        print(json.dumps(deduplicate(root, folders)), flush=True)
+        return
     driver = Driver(browser='chrome', user_data_dir=config['browser_profile'],
                     headless=False, page_load_strategy='eager')
     driver.set_page_load_timeout(40)

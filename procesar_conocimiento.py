@@ -45,7 +45,8 @@ def main():
     tasks = []
     if args.kind == 'pdf':
         materials, _ = material_catalog(context)
-        tasks = [(str(m['canvas_item_id']), m) for m in materials if m['status'] == 'disponible']
+        tasks = [(str(m['canvas_item_id']), m) for m in materials
+                 if m['status'] == 'disponible' and not m.get('duplicate_of')]
     else:
         paths = [] if args.unassigned else sorted(context['root'].glob('semanas/*/clases/*/clase.json'))
         pending_paths = sorted(context['root'].glob('transcripciones-sin-fecha/*/fuente.json'),

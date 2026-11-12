@@ -34,6 +34,7 @@ existentes. Edita `biblioteca.config.json` para indicar:
 | `pilot_file` | Recurso local opcional para las pruebas piloto |
 | `sharepoint_hosts` | Hosts exactos de SharePoint usados por tus materiales |
 | `download_hosts` | Hosts adicionales de descarga/CDN autorizados |
+| `download_host_suffixes` | Dominios de archivos de Canvas que usan un subdominio por archivo, por ejemplo `clusterNNN.canvas-user-content.com`. Solo se aceptan subdominios de ese dominio exacto (mínimo tres niveles, sin comodines) |
 
 Las rutas relativas se resuelven respecto al archivo de configuración, incluso
 si ejecutas Python desde otra carpeta. También se admiten rutas absolutas

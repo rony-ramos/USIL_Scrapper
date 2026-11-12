@@ -146,6 +146,10 @@ def material_catalog(context):
                     'library_path': Path(relative).as_posix() if relative else None,
                     'sha256': sha256(source) if exists else None,
                     'status': 'disponible' if exists else 'pdf_pendiente'}
+        first = next((m for m in materials if material['sha256'] and m['sha256'] == material['sha256']), None)
+        if first:
+            # Mismo contenido que otro PDF del curso: se interpreta una sola vez.
+            material['duplicate_of'] = first['id']
         materials.append(material)
         if len(weeks) > 1 and not manual_week:
             issues.append(f'PDF {record["id"]}: conflicto de semanas {", ".join(sorted(weeks))}; requiere revision.')

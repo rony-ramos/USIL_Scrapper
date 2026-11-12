@@ -50,6 +50,12 @@ def load_settings(path=None):
     for host in cfg['sharepoint_hosts'] + cfg['download_hosts']:
         if not host or '/' in host or ':' in host or host.startswith('.'):
             raise ValueError('Configura hosts exactos, sin esquema, ruta ni comodines')
+    # Dominios de archivos de Canvas con un subdominio por archivo (p. ej. clusterNNN.canvas-user-content.com).
+    cfg.setdefault('download_host_suffixes', [])
+    for suffix in cfg['download_host_suffixes']:
+        if (not isinstance(suffix, str) or not suffix or any(c in suffix for c in '/:*') or suffix.startswith('.')
+                or suffix.count('.') < 2):
+            raise ValueError('download_host_suffixes admite dominios concretos de al menos tres niveles, sin comodines')
     return cfg
 
 

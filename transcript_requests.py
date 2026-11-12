@@ -1,5 +1,5 @@
 """Importar cURL reales de VTT: solicitudes solo en memoria, nunca como comandos."""
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import glob
 import hashlib
 import json
@@ -209,8 +209,11 @@ CAPTURE_SCHEMA = 'zoom-vtt-capture'
 def load_capture(path):
     """Archivo generado en el navegador: VTT y hashes, sin URLs, cookies ni tokens."""
     data = json.loads(Path(path).read_text('utf-8-sig'))
-    if not isinstance(data, dict) or data.get('schema') != CAPTURE_SCHEMA or data.get('version') != 1:
-        raise ValueError(f'{Path(path).name}: no es una captura {CAPTURE_SCHEMA} v1')
+    if not isinstance(data, dict) or data.get('schema') != CAPTURE_SCHEMA or data.get('version') not in (1, 2):
+        raise ValueError(f'{Path(path).name}: no es una captura {CAPTURE_SCHEMA} v1/v2')
+    recording = None
+    if data['version'] == 2:
+        recording = validated_recording(data.get('recording'), Path(path).name)
     reference = data.get('recording_reference')
     if (not isinstance(data.get('id'), str) or not re.fullmatch(r'[0-9a-f]{20}', data['id'])
             or not isinstance(reference, dict) or reference.get('method') != 'observed_viewer_path_sha256'
@@ -218,8 +221,173 @@ def load_capture(path):
             or not isinstance(data.get('vtt'), str)):
         raise ValueError(f'{Path(path).name}: captura incompleta o alterada')
     parse_vtt(data['vtt'])
-    return {'id': data['id'], 'body': data['vtt'],
+    return {'id': data['id'], 'body': data['vtt'], 'recording': recording,
             'reference': {'method': reference['method'], 'sha256': reference['sha256']}}
+
+
+def validated_recording(value, name):
+    """Metadatos del reproductor (v2): hashes, inicio UTC, duracion y tema; nada mas."""
+    hex64 = lambda v: isinstance(v, str) and re.fullmatch(r'[0-9a-f]{64}', v)
+    try:
+        started = datetime.fromisoformat(value['started_at_utc'].replace('Z', '+00:00'))
+        ok = (hex64(value['occurrence_sha256']) and hex64(value['file_id_sha256'])
+              and started.tzinfo is not None and value.get('file_type') in ('MP4', 'M4A')
+              and type(value['duration_seconds']) is int and 0 < value['duration_seconds'] < 86400
+              and isinstance(value['topic'], str) and len(value['topic']) <= 300)
+    except (KeyError, TypeError, AttributeError, ValueError):
+        ok = False
+    if not ok:
+        raise ValueError(f'{name}: metadatos de grabacion incompletos o alterados')
+    return {'occurrence_sha256': value['occurrence_sha256'], 'file_id_sha256': value['file_id_sha256'],
+            'file_type': value['file_type'], 'started_at_utc': started.astimezone(timezone.utc).isoformat(),
+            'duration_seconds': value['duration_seconds'], 'topic': value['topic']}
+
+
+def ensure_class(context, recording, reference):
+    """Crea o completa la clase con la identidad de Zoom (hash de la ocurrencia).
+
+    Es la misma identidad que usa la sincronizacion por listado, asi que no genera duplicados.
+    """
+    from knowledge_core import save_recording
+    class_id = recording['occurrence_sha256'][:20]
+    started = datetime.fromisoformat(recording['started_at_utc'])
+    entry = {'file_id_sha256': recording['file_id_sha256'], 'file_type': recording['file_type'],
+             'started_at_utc': started.isoformat(),
+             'ended_at_utc': (started + timedelta(seconds=recording['duration_seconds'])).isoformat(),
+             'recording_reference': reference}
+    existing = next((load_json(p) for p in context['root'].glob('semanas/*/clases/*/clase.json')
+                     if load_json(p, {}).get('id') == class_id), None)
+    detail = (existing or {}).get('zoom_detail') or {'acquisition': 'zoom_player_info', 'source_timezone': 'UTC',
+                                                     'occurrence_sha256': recording['occurrence_sha256'], 'files': []}
+    if detail.get('occurrence_sha256') != recording['occurrence_sha256']:
+        raise ValueError('La clase existente pertenece a otra ocurrencia de Zoom')
+    files = [f for f in detail['files'] if f['file_id_sha256'] != entry['file_id_sha256']]
+    known = next((f for f in detail['files'] if f['file_id_sha256'] == entry['file_id_sha256']), {})
+    detail = {**detail, 'files': files + [{**entry, **{k: v for k, v in known.items() if k != 'recording_reference'}}]}
+    save_recording(context, {'class_id': class_id,
+                             'meeting_id': (existing or {}).get('meeting_id'),
+                             'started_at_utc': (existing or {}).get('started_at_utc') or started.isoformat(),
+                             'source_timezone': (existing or {}).get('source_timezone') or 'UTC',
+                             'topic': (existing or {}).get('topic') or recording['topic'],
+                             'zoom_detail': detail})
+    inventory_path = context['root'] / 'grabaciones.json'
+    inventory = load_json(inventory_path, [])
+    row = next((r for r in inventory if r['class_id'] == class_id), None)
+    if row is None:
+        inventory.append({'class_id': class_id, 'meeting_id': None, 'started_at_utc': started.isoformat(),
+                          'source_timezone': 'UTC', 'topic': recording['topic'],
+                          'duration_minutes': round(recording['duration_seconds'] / 60),
+                          'zoom_detail': detail, 'status': 'metadata_captured',
+                          'transcript_status': 'pending_import', 'acquisition': 'zoom_player_info'})
+    else:
+        row.update(zoom_detail=detail, status='metadata_captured')
+    write_json(inventory_path, inventory)
+    return class_id
+
+
+INBOX_MARKER = '.usil-zoom-capture-inbox'
+MAX_CAPTURE_BYTES = 25 * 1024 * 1024
+
+
+def capture_inbox(config):
+    return Path(config['knowledge_root']).resolve() / 'entrada-capturas'
+
+
+def init_capture_inbox(config):
+    """Bandeja dedicada: el navegador solo obtiene acceso a esta carpeta."""
+    inbox = capture_inbox(config)
+    for folder in (inbox, inbox / 'importadas', inbox / 'rechazadas'):
+        folder.mkdir(parents=True, exist_ok=True)
+    marker = inbox / INBOX_MARKER
+    if not marker.exists():
+        marker.write_text('Bandeja de capturas zoom-vtt-capture. Elegir solo esta carpeta en el navegador.\n',
+                          encoding='utf-8')
+    return {'inbox': str(inbox), 'status': 'ready'}
+
+
+def reference_index(config):
+    """Referencias de visor verificadas por curso, a partir de los metadatos ya capturados."""
+    index = {}
+    for course_file in Path(config['knowledge_root']).resolve().glob('*/*/curso.json'):
+        root = course_file.parent
+        cid = load_json(course_file, {}).get('course_id')
+        refs = set()
+        for path in root.glob('semanas/*/clases/*/clase.json'):
+            row = load_json(path, {})
+            refs.update(f['recording_reference']['sha256'] for f in row.get('zoom_detail', {}).get('files', [])
+                        if f.get('recording_reference'))
+        for ref in refs:
+            index.setdefault(ref, set()).add(cid)
+    return index
+
+
+def file_away(path, folder):
+    """Mueve una captura procesada sin sobrescribir otra distinta con el mismo nombre."""
+    target = folder / path.name
+    if target.exists():
+        if hashlib.sha256(target.read_bytes()).hexdigest() == hashlib.sha256(path.read_bytes()).hexdigest():
+            path.unlink()
+            return target
+        target = folder / f'{path.stem}-{hashlib.sha256(path.read_bytes()).hexdigest()[:8]}{path.suffix}'
+    path.replace(target)
+    return target
+
+
+def import_inbox(config, dry_run=False):
+    """Importa la bandeja sin indicar curso: cada captura va al curso cuyo visor coincide."""
+    from knowledge_core import course_context, organize
+    inbox = capture_inbox(config)
+    if not (inbox / INBOX_MARKER).exists():
+        raise ValueError('Bandeja sin inicializar; ejecuta conocimiento.py --init-capture-inbox')
+    index = reference_index(config)
+    names = {}
+    library = Path(config['root']).resolve() / 'cursos.json' if config.get('root') else None
+    for course in load_json(library, []) if library else []:
+        if course.get('name'):
+            names.setdefault(course['name'], set()).add(course['id'])
+    reports, by_course = [], {}
+    for path in sorted(inbox.glob('zoom-vtt-*.json')):
+        try:
+            if path.stat().st_size > MAX_CAPTURE_BYTES:
+                raise ValueError('captura demasiado grande')
+            capture = load_capture(path)
+        except (ValueError, OSError) as exc:
+            reports.append({'file': path.name, 'status': 'rejected', 'reason': str(exc)[:120]})
+            if not dry_run:
+                file_away(path, inbox / 'rechazadas')
+            continue
+        courses = index.get(capture['reference']['sha256'], set())
+        if not courses and capture['recording']:
+            # El tema de la reunion coincide exactamente con el nombre del curso en Canvas.
+            courses = names.get(capture['recording']['topic'], set())
+        if len(courses) != 1:
+            # Sin metadatos de Zoom aun (o ambiguo): se conserva en la bandeja hasta sincronizar.
+            reports.append({'file': path.name, 'id': capture['id'], 'status': 'waiting',
+                            'reason': 'sin_metadatos_zoom' if not courses else 'visor_en_varios_cursos'})
+            continue
+        by_course.setdefault(next(iter(courses)), []).append((path, capture['id'], capture))
+    for cid, items in sorted(by_course.items()):
+        try:
+            context = course_context(config, cid)
+            if not dry_run:
+                for _, _, capture in items:
+                    if capture['recording']:
+                        ensure_class(context, capture['recording'], capture['reference'])
+            items = [(p, i) for p, i, _ in items]
+            imported = {r['id']: r for r in import_captures(context, [str(p) for p, _ in items], dry_run)}
+            linked = {a['id']: a['status'] for a in associate_pending(context, dry_run)}
+            if not dry_run:
+                organize(context)
+            for path, capture_id in items:
+                report = imported[capture_id]
+                if not dry_run and report['status'] != 'pending':
+                    file_away(path, inbox / 'importadas')
+                reports.append({'file': path.name, 'course_id': cid, **report,
+                                'association': linked.get(capture_id, 'sin_cambios')})
+        except ValueError as exc:
+            reports.extend({'file': p.name, 'course_id': cid, 'status': 'waiting', 'reason': str(exc)[:120]}
+                           for p, *_ in items)
+    return reports
 
 
 def expand_paths(patterns):
